@@ -306,6 +306,35 @@ function stopMusic(){
   if(_mMaster) _mMaster.gain.setTargetAtTime(0,AC.currentTime,0.5);
 }
 
+// ═══ ENGINE SOUND ════════════════════════════════════════════════
+let _engOsc=null, _engFlt=null, _engGain=null;
+
+function startEngineSound(){
+  if(_engOsc||!AC) return;
+  _engOsc=AC.createOscillator(); _engOsc.type='sawtooth';
+  _engFlt=AC.createBiquadFilter(); _engFlt.type='lowpass'; _engFlt.frequency.value=280; _engFlt.Q.value=3;
+  _engGain=AC.createGain(); _engGain.gain.value=0.038;
+  _engOsc.connect(_engFlt); _engFlt.connect(_engGain); _engGain.connect(AC.destination);
+  _engOsc.frequency.value=58; _engOsc.start();
+  // Sub thud layer
+  const sub=AC.createOscillator(), sg=AC.createGain();
+  sub.type='sine'; sub.frequency.value=38;
+  sg.gain.value=0.022;
+  sub.connect(sg); sg.connect(AC.destination); sub.start();
+}
+
+function updateEngineSound(){
+  if(!_engOsc||!AC||!G||G.state!=='playing') return;
+  const t=(G.speed-215)/(450-215);
+  const freq=58+t*90; // 58–148 Hz
+  const fltFreq=200+t*400; // filter opens with speed
+  const vol=0.028+t*0.022;
+  const nitroBoost=G.pu==='nitro'?1.35:1;
+  _engOsc.frequency.setTargetAtTime(freq*nitroBoost,AC.currentTime,0.08);
+  _engFlt.frequency.setTargetAtTime(fltFreq,AC.currentTime,0.08);
+  _engGain.gain.setTargetAtTime(vol,AC.currentTime,0.08);
+}
+
 // ═══ HASH ════════════════════════════════════════════════════════
 function hash(a,b=0){ let h=(a*1597+b*51749)|0; h=((h^(h>>>13))*1664525+1013904223)|0; return ((h>>>0)%10000)/10000; }
 
@@ -356,12 +385,13 @@ function lerpCol(a,b,t){ return `rgb(${lerpC(a[0],b[0],t)},${lerpC(a[1],b[1],t)}
 
 // ═══ POWER-UP DEFS ═══════════════════════════════════════════════
 const PU_DEFS = {
-  shield: { icon:'🛡️', label:'SHIELD',  col:'#4488ff', dur:0 },   // lasts until hit
-  nitro:  { icon:'⚡',  label:'NITRO',   col:'#ffcc00', dur:5 },
+  shield: { icon:'🛡️', label:'SHIELD',  col:'#4488ff', dur:0 },
+  nitro:  { icon:'🔥',  label:'NITRO',   col:'#ffcc00', dur:5 },
   magnet: { icon:'🧲',  label:'MAGNET',  col:'#ff44cc', dur:7 },
   ghost:  { icon:'👻',  label:'GHOST',   col:'#aaffcc', dur:5 },
+  emp:    { icon:'⚡',  label:'EMP',     col:'#88ffff', dur:3 },
 };
-const PU_KEYS = ['shield','nitro','magnet','ghost'];
+const PU_KEYS = ['shield','nitro','magnet','ghost','emp'];
 
 // ═══ STATE ═══════════════════════════════════════════════════════
 let G;
@@ -388,6 +418,14 @@ function newGame(){
 
     spawnCarT:0, coinT:0, puT:0,
     waveDense:false, waveTimer:10+Math.random()*5,
+
+    combo:0, comboTimer:0, bonusPoints:0,  // near-miss combo
+    shake:0,                                // screen shake intensity
+    drafting:false, draftTimer:0,           // slipstream drafting
+    weather:'clear', weatherTimer:25+Math.random()*20,
+    rainDrops:[],
+    narrowing:false, narrowTimer:35+Math.random()*20,
+    emp:false, empTimer:0,
 
     bldNear: genBldLayer(320, 0),
     bldFar:  genBldLayer(200, 53),
@@ -416,7 +454,7 @@ canvas.addEventListener('pointerdown', e => {
   if(cy < H/2 && p.lane>0)        { p.lane--; sfxHonk(); }
   if(cy >= H/2 && p.lane<LANES-1) { p.lane++; sfxHonk(); }
 });
-function handleStart(){ ensureAudio(); if(G.state!=='playing'){newGame();G.state='playing'; startMusic();} }
+function handleStart(){ ensureAudio(); if(G.state!=='playing'){newGame();G.state='playing'; startMusic(); startEngineSound();} }
 
 // ═══ PARTICLES ═══════════════════════════════════════════════════
 function spawnParts(x,y,n,col){
@@ -443,7 +481,7 @@ function update(ts){
   } else {
     G.camera += G.speed*dt;
   }
-  G.score = Math.floor(G.camera/10)+G.coins*10;
+  G.score = Math.floor(G.camera/10) + G.coins*10 + G.bonusPoints;
   if(G.score>G.best) G.best=G.score;
   G.flash = Math.max(0,G.flash-rawDt*4);
 
@@ -474,6 +512,52 @@ function update(ts){
     if(G.waveDense) G.toasts.push({msg:'🚗 Traffic ahead!', timer:1.8});
   }
 
+  // ── Combo decay ───────────────────────────────────────────────
+  if(G.combo>0){ G.comboTimer-=dt; if(G.comboTimer<=0) G.combo=0; }
+
+  // ── Screen shake decay ────────────────────────────────────────
+  G.shake=Math.max(0,G.shake-dt*28);
+
+  // ── EMP timer ────────────────────────────────────────────────
+  if(G.emp){ G.empTimer-=dt; if(G.empTimer<=0) G.emp=false; }
+
+  // ── Weather cycle ─────────────────────────────────────────────
+  G.weatherTimer-=dt;
+  if(G.weatherTimer<=0){
+    G.weather = G.weather==='clear' ? 'rain' : 'clear';
+    G.weatherTimer = G.weather==='rain' ? (12+Math.random()*8) : (22+Math.random()*18);
+    if(G.weather==='rain') G.toasts.push({msg:'🌧️ Rain!',timer:2});
+  }
+  if(G.weather==='rain'){
+    while(G.rainDrops.length<90) G.rainDrops.push({x:Math.random()*W,y:Math.random()*H,spd:280+Math.random()*140});
+    for(const d of G.rainDrops){
+      d.x-=(G.speed/215)*dt*25; d.y+=d.spd*dt;
+      if(d.y>H){d.y=0;d.x=Math.random()*W;}
+      if(d.x<0){d.x=W;}
+    }
+  } else { if(G.rainDrops.length) G.rainDrops=[]; }
+
+  // ── Road narrowing ────────────────────────────────────────────
+  G.narrowTimer-=dt;
+  if(G.narrowTimer<=0){
+    G.narrowing=!G.narrowing;
+    G.narrowTimer=G.narrowing?(8+Math.random()*5):(28+Math.random()*18);
+    if(G.narrowing) G.toasts.push({msg:'⚠️ Road narrows!',timer:2.2});
+  }
+  if(G.narrowing && p.lane===0) p.lane=1;
+
+  // ── Drafting detection ────────────────────────────────────────
+  G.drafting=false;
+  for(const c of G.cars){
+    if(c.lane!==p.lane) continue;
+    const csx=c.worldX-G.camera;
+    if(csx>PLAYER_X+PW/2+5 && csx<PLAYER_X+PW/2+90){
+      G.drafting=true; G.draftTimer+=dt; break;
+    }
+  }
+  if(!G.drafting) G.draftTimer=Math.max(0,G.draftTimer-dt*3);
+  if(G.draftTimer>1.8){ G.camera+=G.speed*0.14*dt; } // slipstream boost
+
   // ── Traffic cars (same direction, slower) ─────────────────────
   for(const c of G.cars){
     c.y = (c.y ?? laneCenter(c.lane));
@@ -500,7 +584,7 @@ function update(ts){
 
   // Speed regulation: slow down if closing on car ahead in same lane
   for(const c of G.cars){
-    if(c.braking) { c.worldX += c.fwdSpd*dt; continue; } // erratic braker skips normal regulation
+    if(c.braking) { if(!G.emp) c.worldX += c.fwdSpd*dt; continue; } // erratic braker skips normal regulation
     const cSX = c.worldX - G.camera;
     const cImg = IMG[c.key]; if(!cImg) continue;
     const cDW = cImg.naturalWidth * c.scale;
@@ -518,7 +602,7 @@ function update(ts){
     } else {
       c.fwdSpd = Math.min(c.origSpd, c.fwdSpd + CAR_ACCEL*dt);
     }
-    c.worldX += c.fwdSpd*dt;
+    if(!G.emp) c.worldX += c.fwdSpd*dt;
   }
 
   G.cars = G.cars.filter(c => {
@@ -620,8 +704,37 @@ function update(ts){
     }
   }
 
+  // ── Near-miss detection ───────────────────────────────────────
+  if(!G.ghost && p.invuln<=0){
+    for(const c of G.cars){
+      if(c.nmChecked) continue;
+      const img2=IMG[c.key]; if(!img2) continue;
+      const nmSX=c.worldX-G.camera;
+      const nmDW=Math.round(img2.naturalWidth*c.scale);
+      const nmDH=Math.round(img2.naturalHeight*c.scale);
+      // Car right edge just cleared player left edge
+      if(nmSX+nmDW/2 < PLAYER_X-PW/2 && nmSX+nmDW/2 > PLAYER_X-PW/2-45){
+        c.nmChecked=true;
+        const cy2=c.y??laneCenter(c.lane);
+        const vertDist=Math.abs(cy2-p.y);
+        const collThresh=(nmDH/2+PH/2)-8;
+        if(vertDist<LANE_H*0.88 && vertDist>collThresh){
+          G.combo=(G.combo||0)+1;
+          G.comboTimer=3.2;
+          const mult=Math.min(4,1+Math.floor((G.combo-1)/3));
+          const bonus=Math.round(30*mult);
+          G.bonusPoints=(G.bonusPoints||0)+bonus;
+          G.shake=Math.max(G.shake,2.5);
+          G.toasts.push({msg:`💨 CLOSE!${G.combo>1?' ×'+G.combo:''} +${bonus}`,timer:1.1});
+        }
+      }
+      if(nmSX<-200) c.nmChecked=false;
+    }
+  }
+
   for(const t of G.toasts) t.timer-=rawDt;
   G.toasts=G.toasts.filter(t=>t.timer>0);
+  updateEngineSound();
   tickParts(dt);
 }
 
@@ -660,6 +773,13 @@ function busted(){
 }
 
 function activatePU(type){
+  if(type==='emp'){
+    G.emp=true; G.empTimer=PU_DEFS.emp.dur;
+    sfxPU();
+    spawnParts(W/2,H/2,20,'#88ffff');
+    G.toasts.push({msg:'⚡ EMP! Traffic frozen!',timer:2.2});
+    return;
+  }
   if(type==='ghost'){
     // Ghost is stored as a charge — player deploys manually with SPACE
     G.ghostCharges = Math.min(G.ghostCharges + 1, 3);
@@ -685,18 +805,25 @@ function deployGhost(){
 // ═══ DRAW ════════════════════════════════════════════════════════
 function draw(){
   ctx.clearRect(0,0,W,H);
+  // Screen shake — world only
+  let shook=false;
+  if(G.shake>0.3){ shook=true; ctx.save(); ctx.translate((Math.random()-0.5)*G.shake*2,(Math.random()-0.5)*G.shake*1.2); }
   drawSky();
   drawBldFar();
   drawBldNear();
   drawSidewalkTop();
   drawRoad();
+  drawNarrowWarning();
   drawSidewalkBot();
+  drawRain();
   drawCoins();
   drawPUItems();
   drawTraffic();
   drawPlayer();
   drawParticles();
   drawSpeedLines();
+  if(shook) ctx.restore();
+  // HUD always stable
   drawHUD();
   if(G.flash>0){ ctx.fillStyle=`rgba(220,0,0,${(G.flash*0.32).toFixed(2)})`; ctx.fillRect(0,0,W,H); }
   if(G.paused)             drawPause();
@@ -969,6 +1096,16 @@ function drawTraffic(){
     // Car sprite
     ctx.drawImage(img,0,0,img.naturalWidth,img.naturalHeight,sx,sy,dw,dh);
 
+    // EMP freeze glow
+    if(G.emp){
+      const glitch=Math.sin(Date.now()/40)*0.4+0.6;
+      ctx.save(); ctx.globalAlpha=glitch*0.55;
+      ctx.strokeStyle='#88ffff'; ctx.lineWidth=2;
+      ctx.shadowColor='#88ffff'; ctx.shadowBlur=12;
+      ctx.strokeRect(Math.round(sx-dw/2),Math.round(cy-dh/2),dw,dh);
+      ctx.restore();
+    }
+
     // Erratic brake lights
     if(c.erratic && c.braking){
       ctx.save(); ctx.globalAlpha=0.75;
@@ -1022,11 +1159,15 @@ function drawPlayer(){
 
   // Nitro trail
   if(G.pu==='nitro'){
-    const t2=G.elapsed;
-    for(let i=0;i<4;i++){
-      ctx.save(); ctx.globalAlpha=0.35-i*0.07;
-      ctx.fillStyle='#ffcc00';
-      ctx.beginPath(); ctx.ellipse(sx-10-i*12,p.y,6-i,PH/3,0,0,Math.PI*2); ctx.fill();
+    // Fire trail
+    const trailCols=['#fff7cc','#ffdd00','#ff8800','#ff4400','#cc2200'];
+    for(let i=0;i<10;i++){
+      const tx=sx-8-i*11+(Math.random()-0.5)*6;
+      const ty=p.y+(Math.random()-0.5)*PH*0.7;
+      const sz=Math.max(1,(6-i*0.4)*(0.6+Math.random()*0.4));
+      ctx.save(); ctx.globalAlpha=(1-i/10)*0.85;
+      ctx.fillStyle=trailCols[Math.min(i,4)];
+      ctx.beginPath(); ctx.ellipse(tx,ty,sz,sz*0.7,0,0,Math.PI*2); ctx.fill();
       ctx.restore();
     }
   }
@@ -1066,6 +1207,44 @@ function drawParticles(){
     ctx.fillRect(p.x-p.sz/2,p.y-p.sz/2,p.sz,p.sz);
   }
   ctx.globalAlpha=1; ctx.restore();
+}
+
+function drawRain(){
+  if(!G.rainDrops||!G.rainDrops.length) return;
+  ctx.save();
+  ctx.strokeStyle='rgba(180,210,255,0.45)'; ctx.lineWidth=1;
+  for(const d of G.rainDrops){
+    ctx.beginPath(); ctx.moveTo(d.x,d.y); ctx.lineTo(d.x-5,d.y+14); ctx.stroke();
+  }
+  ctx.fillStyle='rgba(60,100,200,0.05)'; ctx.fillRect(0,0,W,H);
+  ctx.restore();
+}
+
+function drawNarrowWarning(){
+  if(!G.narrowing) return;
+  const lY0=laneCenter(0)-LANE_H/2, lH=LANE_H;
+  const scroll=(G.camera*0.4)%56;
+  ctx.save();
+  // Warning overlay
+  ctx.globalAlpha=0.28; ctx.fillStyle='#ff6600'; ctx.fillRect(0,lY0,W,lH);
+  // Diagonal hazard stripes
+  ctx.globalAlpha=0.22; ctx.strokeStyle='#ffcc00'; ctx.lineWidth=8;
+  for(let x=-56+scroll;x<W+lH;x+=28){
+    ctx.beginPath(); ctx.moveTo(x,lY0); ctx.lineTo(x+lH,lY0+lH); ctx.stroke();
+  }
+  // Traffic cones
+  ctx.globalAlpha=1;
+  const spacing=110;
+  for(let wx=G.camera-((G.camera%spacing));wx<G.camera+W+spacing;wx+=spacing){
+    const cx=Math.round(wx-G.camera);
+    const cy=lY0+lH-2;
+    ctx.fillStyle='#ff6600';
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx-7,cy-22); ctx.lineTo(cx+7,cy-22); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='white';
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx-3,cy-10); ctx.lineTo(cx+3,cy-10); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#333'; ctx.fillRect(cx-9,cy,18,4);
+  }
+  ctx.restore();
 }
 
 // ═══ HUD ══════════════════════════════════════════════════════════
@@ -1132,6 +1311,30 @@ function drawHUD(){
     ctx.fillStyle='white'; ctx.font="bold 11px 'Kenney Rocket', monospace";
     ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(`${def.icon} ${def.label}`,W/2,BY+BH+4+8);
+  }
+
+  // ── Combo multiplier display ──────────────────────────────────
+  if(G.combo>=2 && G.state==='playing'){
+    const mult=Math.min(4,1+Math.floor((G.combo-1)/3));
+    const pulse=0.8+0.2*Math.sin(Date.now()/110);
+    const col=mult>=3?'#ff4444':mult>=2?'#ffaa00':'#ffff66';
+    ctx.save(); ctx.globalAlpha=pulse;
+    ctx.font=`bold 13px 'Kenney Rocket', monospace`;
+    ctx.textAlign='right'; ctx.textBaseline='top';
+    ctx.fillStyle=col;
+    ctx.fillText(`COMBO ×${mult.toFixed(1)}`,BX+BW-14,BY+BH+6);
+    ctx.restore();
+  }
+
+  // ── Drafting indicator ────────────────────────────────────────
+  if(G.drafting && G.draftTimer>0.4 && G.state==='playing'){
+    const pulse=0.7+0.3*Math.sin(Date.now()/180);
+    ctx.save(); ctx.globalAlpha=pulse;
+    ctx.font=`bold 12px 'Kenney Rocket', monospace`;
+    ctx.textAlign='left'; ctx.textBaseline='top';
+    ctx.fillStyle='#aaffcc';
+    ctx.fillText('〉〉 DRAFTING',BX+14,BY+BH+6);
+    ctx.restore();
   }
 
   // ── Ghost charge indicator (bottom centre) ──
