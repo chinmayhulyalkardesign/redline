@@ -121,113 +121,180 @@ const sfxNitro   = () => { noise(0.12,400,800,0.15); tone(220,'sawtooth',0.2,0.0
 
 // ═══ SYNTHWAVE MUSIC ENGINE ═══════════════════════════════════════
 let _mPlaying=false, _mStep=0, _mNextT=0, _mTimerID=null, _mMaster=null, _mDly=null;
-const _BPM=128, _STEP=60/_BPM/4; // 16th note ≈ 0.117 s
 
 function startMusic(){
   if(_mPlaying||!AC) return;
   _mPlaying=true;
 
-  // Master chain: compressor → gain → out
+  const BPM=108, STEP=60/BPM/4; // 16th note ≈ 0.139 s — darkwave tempo
+
+  // ── Master chain: compressor → gain ─────────────────────────────
   const comp=AC.createDynamicsCompressor();
-  comp.threshold.value=-10; comp.ratio.value=4;
-  _mMaster=AC.createGain(); _mMaster.gain.value=0.38;
+  comp.threshold.value=-12; comp.ratio.value=4; comp.knee.value=8;
+  comp.attack.value=0.003; comp.release.value=0.3;
+  _mMaster=AC.createGain(); _mMaster.gain.value=0.42;
   comp.connect(_mMaster); _mMaster.connect(AC.destination);
 
-  // Atmospheric delay bus (dotted-8th feedback)
-  _mDly=AC.createDelay(1.0); _mDly.delayTime.value=_STEP*3;
-  const dlyFB=AC.createGain(); dlyFB.gain.value=0.28;
-  const dlyOut=AC.createGain(); dlyOut.gain.value=0.20;
+  // ── Short slapback delay (depth) ────────────────────────────────
+  _mDly=AC.createDelay(1.0); _mDly.delayTime.value=STEP*2;
+  const dlyFB=AC.createGain(); dlyFB.gain.value=0.30;
+  const dlyOut=AC.createGain(); dlyOut.gain.value=0.22;
   _mDly.connect(dlyFB); dlyFB.connect(_mDly);
   _mDly.connect(dlyOut); dlyOut.connect(_mMaster);
 
-  // ── Patterns (16 steps) ─────────────────────────────────────────
-  const K=[1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0]; // 4-on-floor kick
-  const S=[0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0]; // snare on 2+4
-  const H=[0,1,0,1, 0,1,0,1, 0,1,0,1, 0,1,0,1]; // offbeat closed hat
-  const O=[0,0,0,0, 0,0,0,1, 0,0,0,0, 0,0,0,1]; // open hat
+  // ── Long reverb tail (snare + lead ambience) ─────────────────────
+  const revDly=AC.createDelay(2.0); revDly.delayTime.value=0.55;
+  const revFB=AC.createGain(); revFB.gain.value=0.20;
+  const revHP=AC.createBiquadFilter(); revHP.type='highpass'; revHP.frequency.value=300;
+  const revOut=AC.createGain(); revOut.gain.value=0.14;
+  revDly.connect(revHP); revHP.connect(revFB); revFB.connect(revDly);
+  revDly.connect(revOut); revOut.connect(_mMaster);
 
-  // Note frequencies
-  const A2=110,C3=130.81,E3=164.81,F3=174.61,G3=196,A3=220,
-        C4=261.63,D4=293.66,E4=329.63,F4=349.23,G4=392,A4=440;
+  // ── Note frequencies — D minor ───────────────────────────────────
+  const D2=73.42, A2=110, Bb2=116.54, C3=130.81, D3=146.83,
+        F3=174.61, G3=196, A3=220, C4=261.63, D4=293.66,
+        F4=349.23, G4=392, A4=440;
 
-  // Bass (32-step, 2-bar Am loop)
+  // ── Drum patterns (16 steps) ─────────────────────────────────────
+  const K=[1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0]; // kick on 1+3 (dark, not 4-on-floor)
+  const S=[0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0]; // snare 2+4
+  const H=[0,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,1,0]; // sparse hats
+
+  // ── Bass (32-step, 2-bar Dm→Bb→F→C) ────────────────────────────
   const BASS=[
-    A2,0,A2,0, C3,0,E3,0, A2,0,A2,0, G3,0,E3,0,
-    F3,0,F3,0, A3,0,C4,0, F3,0,E3,0, A2,0,A2,0,
+    D2,0,D2,0, A2,0,D3,0, D2,0,D2,0, C3,0,A2,0,
+    Bb2,0,Bb2,0,F3,0,D3,0, C3,0,C3,0, D3,0,A2,0,
   ];
 
-  // Arp melody — A-minor pentatonic, plays every 8th note
-  const ARP=[A4,E4,G4,A4, C4,E4,G4,A4, F4,A4,C4,E4, E4,G4,A4,E4];
+  // ── Lead melody (sparse, eerie — plays on select 32-step positions)
+  const LEAD_ON=new Set([0,10,16,22,28]);
+  const LEAD_NOTES=[D4,A3,F4,D4,C4,A3,G4,F4];
+  let leadIdx=0;
 
-  // ── Instrument voices ────────────────────────────────────────────
+  // ── Pad chords (alternate per bar) ──────────────────────────────
+  const PADS=[[D3,F3,A3],[Bb2,D3,F3],[F3,A3,C4],[C3,G3,Bb2]];
+  let padBar=0;
+
+  // ── Instruments ─────────────────────────────────────────────────
+
   function doKick(t){
-    const o=AC.createOscillator(),g=AC.createGain();
+    // Deep 808-style: long pitch sweep + sub sine punch
+    const o=AC.createOscillator(), g=AC.createGain();
     o.type='sine';
-    o.frequency.setValueAtTime(115,t); o.frequency.exponentialRampToValueAtTime(42,t+0.09);
-    g.gain.setValueAtTime(1.5,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.28);
-    o.connect(g); g.connect(_mMaster); o.start(t); o.stop(t+0.28);
+    o.frequency.setValueAtTime(145,t);
+    o.frequency.exponentialRampToValueAtTime(36,t+0.22);
+    g.gain.setValueAtTime(2.0,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.55);
+    o.connect(g); g.connect(_mMaster); o.start(t); o.stop(t+0.55);
+    // Sub layer
+    const sub=AC.createOscillator(), sg=AC.createGain();
+    sub.type='sine'; sub.frequency.value=D2;
+    sg.gain.setValueAtTime(0.7,t); sg.gain.exponentialRampToValueAtTime(0.001,t+0.35);
+    sub.connect(sg); sg.connect(_mMaster); sub.start(t); sub.stop(t+0.35);
   }
 
   function doSnare(t){
-    const len=Math.ceil(AC.sampleRate*0.13);
-    const buf=AC.createBuffer(1,len,AC.sampleRate),d=buf.getChannelData(0);
+    // Gated noise burst with high-passed body — sent into reverb tail
+    const len=Math.ceil(AC.sampleRate*0.25);
+    const buf=AC.createBuffer(1,len,AC.sampleRate), d=buf.getChannelData(0);
     for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
     const n=AC.createBufferSource(); n.buffer=buf;
+    const hp=AC.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=1400;
     const ng=AC.createGain();
-    ng.gain.setValueAtTime(0.5,t); ng.gain.exponentialRampToValueAtTime(0.001,t+0.13);
-    n.connect(ng); ng.connect(_mMaster); n.start(t); n.stop(t+0.13);
-    const o=AC.createOscillator(),og=AC.createGain();
-    o.type='triangle'; o.frequency.value=210;
-    og.gain.setValueAtTime(0.3,t); og.gain.exponentialRampToValueAtTime(0.001,t+0.06);
-    o.connect(og); og.connect(_mMaster); o.start(t); o.stop(t+0.06);
+    ng.gain.setValueAtTime(0.55,t); ng.gain.exponentialRampToValueAtTime(0.001,t+0.25);
+    n.connect(hp); hp.connect(ng);
+    ng.connect(_mMaster); ng.connect(revDly); // wet reverb send
+    n.start(t); n.stop(t+0.25);
+    // Tone body
+    const o=AC.createOscillator(), og=AC.createGain();
+    o.type='triangle'; o.frequency.value=190;
+    og.gain.setValueAtTime(0.28,t); og.gain.exponentialRampToValueAtTime(0.001,t+0.09);
+    o.connect(og); og.connect(_mMaster); o.start(t); o.stop(t+0.09);
   }
 
-  function doHat(t,open){
-    const dur=open?0.14:0.032;
-    const len=Math.ceil(AC.sampleRate*dur);
-    const buf=AC.createBuffer(1,len,AC.sampleRate),d=buf.getChannelData(0);
+  function doHat(t){
+    const len=Math.ceil(AC.sampleRate*0.055);
+    const buf=AC.createBuffer(1,len,AC.sampleRate), d=buf.getChannelData(0);
     for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
     const n=AC.createBufferSource(); n.buffer=buf;
-    const f=AC.createBiquadFilter(); f.type='highpass'; f.frequency.value=7800;
+    const f=AC.createBiquadFilter(); f.type='highpass'; f.frequency.value=9500;
     const g=AC.createGain();
-    g.gain.setValueAtTime(open?0.16:0.09,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
-    n.connect(f); f.connect(g); g.connect(_mMaster); n.start(t); n.stop(t+dur);
+    g.gain.setValueAtTime(0.07,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.055);
+    n.connect(f); f.connect(g); g.connect(_mMaster); n.start(t); n.stop(t+0.055);
   }
 
   function doBass(t,freq){
-    const dur=_STEP*1.82;
-    const o1=AC.createOscillator(),o2=AC.createOscillator();
-    const flt=AC.createBiquadFilter(),g=AC.createGain();
-    o1.type='sawtooth'; o1.frequency.value=freq;
-    o2.type='sawtooth'; o2.frequency.value=freq*1.007; // slight detune
-    flt.type='lowpass'; flt.Q.value=6;
-    flt.frequency.setValueAtTime(520,t); flt.frequency.exponentialRampToValueAtTime(160,t+dur);
-    g.gain.setValueAtTime(0.44,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
-    o1.connect(flt); o2.connect(flt); flt.connect(g); g.connect(_mMaster);
-    o1.start(t); o1.stop(t+dur); o2.start(t); o2.stop(t+dur);
+    const dur=STEP*1.88;
+    // Sub sine — the "feel it in your chest" layer
+    const sub=AC.createOscillator(), sg=AC.createGain();
+    sub.type='sine'; sub.frequency.value=freq;
+    sg.gain.setValueAtTime(0.58,t); sg.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    sub.connect(sg); sg.connect(_mMaster); sub.start(t); sub.stop(t+dur);
+    // Gritty mid-sawtooth, heavily filtered
+    const o=AC.createOscillator(), flt=AC.createBiquadFilter(), g=AC.createGain();
+    o.type='sawtooth'; o.frequency.value=freq*2;
+    flt.type='lowpass'; flt.Q.value=9;
+    flt.frequency.setValueAtTime(480,t); flt.frequency.exponentialRampToValueAtTime(110,t+dur);
+    g.gain.setValueAtTime(0.35,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    o.connect(flt); flt.connect(g); g.connect(_mMaster); o.start(t); o.stop(t+dur);
   }
 
-  function doArp(t,freq){
-    const dur=_STEP*1.55;
-    const o=AC.createOscillator(),g=AC.createGain();
-    o.type='square'; o.frequency.value=freq;
-    g.gain.setValueAtTime(0.065,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
-    o.connect(g); g.connect(_mDly); g.connect(_mMaster); // send to delay bus
+  function doPad(t, chord){
+    // Lush detuned pad with slow attack — the "wall of sound" layer
+    chord.forEach((freq,i) => {
+      [1, 1.004, 0.997].forEach(det => {
+        const o=AC.createOscillator(), flt=AC.createBiquadFilter(), g=AC.createGain();
+        o.type= i===0 ? 'sawtooth' : 'triangle';
+        o.frequency.value=freq*det;
+        flt.type='lowpass'; flt.frequency.value=900; flt.Q.value=1.2;
+        const dur=STEP*16+0.3;
+        g.gain.setValueAtTime(0,t);
+        g.gain.linearRampToValueAtTime(0.028,t+1.1); // slow bloom
+        g.gain.setValueAtTime(0.028,t+dur-0.5);
+        g.gain.linearRampToValueAtTime(0,t+dur);
+        o.connect(flt); flt.connect(g);
+        g.connect(_mDly); g.connect(_mMaster);
+        o.start(t); o.stop(t+dur);
+      });
+    });
+  }
+
+  function doLead(t, freq){
+    // Breathy sine with vibrato + long delay — Nightcall-style melody
+    const dur=STEP*6;
+    const o=AC.createOscillator(), g=AC.createGain();
+    o.type='sine'; o.frequency.value=freq;
+    // Vibrato
+    const lfo=AC.createOscillator(), lfoG=AC.createGain();
+    lfo.type='sine'; lfo.frequency.value=4.8;
+    lfoG.gain.value=freq*0.012;
+    lfo.connect(lfoG); lfoG.connect(o.frequency);
+    lfo.start(t); lfo.stop(t+dur);
+    // Soft attack, sustained, fade out
+    g.gain.setValueAtTime(0,t);
+    g.gain.linearRampToValueAtTime(0.12,t+0.18);
+    g.gain.setValueAtTime(0.12,t+dur-0.25);
+    g.gain.linearRampToValueAtTime(0,t+dur);
+    o.connect(g);
+    g.connect(_mDly);   // lots of delay for atmosphere
+    g.connect(revDly);  // and reverb
+    g.connect(_mMaster);
     o.start(t); o.stop(t+dur);
   }
 
-  // ── Lookahead scheduler ─────────────────────────────────────────
+  // ── Lookahead scheduler ──────────────────────────────────────────
   _mNextT=AC.currentTime+0.05; _mStep=0;
   function schedule(){
-    while(_mNextT < AC.currentTime+0.14){
+    while(_mNextT < AC.currentTime+0.16){
       const s=_mStep%16, s32=_mStep%32, t=_mNextT;
       if(K[s]) doKick(t);
       if(S[s]) doSnare(t);
-      if(H[s]) doHat(t,false);
-      if(O[s]) doHat(t,true);
+      if(H[s]) doHat(t);
       const bf=BASS[s32]; if(bf) doBass(t,bf);
-      if(s%2===0) doArp(t, ARP[Math.floor(s32/2)%ARP.length]);
-      _mStep++; _mNextT+=_STEP;
+      // Pad blooms every bar (16 steps)
+      if(s===0){ doPad(t, PADS[padBar%PADS.length]); padBar++; }
+      // Sparse lead
+      if(LEAD_ON.has(s32)){ doLead(t, LEAD_NOTES[leadIdx%LEAD_NOTES.length]); leadIdx++; }
+      _mStep++; _mNextT+=STEP;
     }
     if(_mPlaying) _mTimerID=setTimeout(schedule,35);
   }
@@ -236,7 +303,7 @@ function startMusic(){
 
 function stopMusic(){
   _mPlaying=false; clearTimeout(_mTimerID);
-  if(_mMaster) _mMaster.gain.setTargetAtTime(0,AC.currentTime,0.4);
+  if(_mMaster) _mMaster.gain.setTargetAtTime(0,AC.currentTime,0.5);
 }
 
 // ═══ HASH ════════════════════════════════════════════════════════
