@@ -508,7 +508,7 @@ function update(ts){
   G.waveTimer -= dt;
   if(G.waveTimer <= 0){
     G.waveDense = !G.waveDense;
-    G.waveTimer = G.waveDense ? (6+Math.random()*5) : (10+Math.random()*8);
+    G.waveTimer = G.waveDense ? (5+Math.random()*3) : (12+Math.random()*10);
     if(G.waveDense) G.toasts.push({msg:'🚗 Traffic ahead!', timer:1.8});
   }
 
@@ -623,14 +623,14 @@ function update(ts){
     if(freeLanes.length > 0){
       const def  = TRAFFIC_DEFS[Math.floor(Math.random()*TRAFFIC_DEFS.length)];
       const lane = freeLanes[Math.floor(Math.random()*freeLanes.length)];
-      const fwdSpd = G.speed*(0.48+Math.random()*0.32);
-      const erratic = Math.random() < 0.20;
+      const fwdSpd = G.speed*(G.waveDense ? 0.52+Math.random()*0.22 : 0.48+Math.random()*0.32);
+      const erratic = Math.random() < (G.waveDense ? 0.12 : 0.20); // fewer erratic drivers in dense waves
       G.cars.push({ key:def.key, scale:def.scale, lane, y:laneCenter(lane),
                     worldX:spawnX, fwdSpd, origSpd:fwdSpd, erratic, erraticT:4+Math.random()*4 });
     }
     // Dense wave: much shorter interval
-    const base = G.waveDense ? Math.max(0.28, 0.7-G.elapsed*0.004)
-                             : Math.max(1.1,  2.8-G.elapsed*0.012);
+    const base = G.waveDense ? Math.max(0.55, 1.1-G.elapsed*0.004)
+                             : Math.max(1.4,  3.2-G.elapsed*0.012);
     G.spawnCarT = base;
   }
 
