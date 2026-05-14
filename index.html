@@ -1289,18 +1289,11 @@ function drawHUD(){
   ctx.fillStyle='rgba(255,255,255,0.14)'; ctx.fillRect(BX+PAD+394, BY+7, 1, BH-14);
 
   // ── SPEED ──
-  ctx.font="bold 12px 'Kenney Rocket', monospace"; ctx.textAlign='left';
-  ctx.fillStyle='rgba(255,255,255,0.40)'; ctx.fillText('SPD', BX+PAD+406, CY);
   const spdN=Math.floor(G.speed);
   const spdPct=Math.max(0,Math.min(1,G.speed/450));
   const spdCol=`hsl(${Math.round(120-spdPct*120)},90%,55%)`;
-  const GX=BX+PAD+442, GW=BW-PAD-442-80, GY=CY-5, GH=10;
-  ctx.fillStyle='rgba(255,255,255,0.14)';
-  ctx.beginPath(); ctx.roundRect(GX,GY,GW,GH,3); ctx.fill();
-  const fillW=Math.max(6,Math.floor(GW*spdPct));
+  ctx.font="bold 13px 'Kenney Rocket', monospace"; ctx.textAlign='right';
   ctx.fillStyle=spdCol;
-  ctx.beginPath(); ctx.roundRect(GX,GY,fillW,GH,3); ctx.fill();
-  ctx.fillStyle='white'; ctx.textAlign='right';
   ctx.fillText(`${spdN} km/h`, BX+BW-PAD, CY);
 
   // ── Active power-up strip (just below bar, playing only) ──
