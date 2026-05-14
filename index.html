@@ -13,7 +13,7 @@
     * { margin:0; padding:0; box-sizing:border-box; }
     body { background:#0d0d0d; display:flex; justify-content:center; align-items:center; height:100vh; overflow:hidden;
            font-family: 'Kenney Rocket', monospace; }
-    canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; max-width:100vw; max-height:100vh; width:auto; height:auto; }
+    canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges; }
   </style>
 </head>
 <body>
@@ -23,6 +23,14 @@
 const canvas = document.getElementById('game');
 const ctx    = canvas.getContext('2d');
 const W = 800, H = 450;
+
+function resizeCanvas(){
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = Math.floor(W * scale) + 'px';
+  canvas.style.height = Math.floor(H * scale) + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
 
 // ═══ FONT ════════════════════════════════════════════════════════
 const KR = "'Kenney Rocket', monospace";
@@ -111,6 +119,126 @@ const sfxPU      = () => [440,554,659,880].forEach((f,i)=>tone(f,'sine',0.11,0.1
 const sfxShield  = () => { tone(80,'sine',0.18,0.16,40); noise(0.14,180,50,0.13); };
 const sfxNitro   = () => { noise(0.12,400,800,0.15); tone(220,'sawtooth',0.2,0.08,440); };
 
+// ═══ SYNTHWAVE MUSIC ENGINE ═══════════════════════════════════════
+let _mPlaying=false, _mStep=0, _mNextT=0, _mTimerID=null, _mMaster=null, _mDly=null;
+const _BPM=128, _STEP=60/_BPM/4; // 16th note ≈ 0.117 s
+
+function startMusic(){
+  if(_mPlaying||!AC) return;
+  _mPlaying=true;
+
+  // Master chain: compressor → gain → out
+  const comp=AC.createDynamicsCompressor();
+  comp.threshold.value=-10; comp.ratio.value=4;
+  _mMaster=AC.createGain(); _mMaster.gain.value=0.38;
+  comp.connect(_mMaster); _mMaster.connect(AC.destination);
+
+  // Atmospheric delay bus (dotted-8th feedback)
+  _mDly=AC.createDelay(1.0); _mDly.delayTime.value=_STEP*3;
+  const dlyFB=AC.createGain(); dlyFB.gain.value=0.28;
+  const dlyOut=AC.createGain(); dlyOut.gain.value=0.20;
+  _mDly.connect(dlyFB); dlyFB.connect(_mDly);
+  _mDly.connect(dlyOut); dlyOut.connect(_mMaster);
+
+  // ── Patterns (16 steps) ─────────────────────────────────────────
+  const K=[1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0]; // 4-on-floor kick
+  const S=[0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0]; // snare on 2+4
+  const H=[0,1,0,1, 0,1,0,1, 0,1,0,1, 0,1,0,1]; // offbeat closed hat
+  const O=[0,0,0,0, 0,0,0,1, 0,0,0,0, 0,0,0,1]; // open hat
+
+  // Note frequencies
+  const A2=110,C3=130.81,E3=164.81,F3=174.61,G3=196,A3=220,
+        C4=261.63,D4=293.66,E4=329.63,F4=349.23,G4=392,A4=440;
+
+  // Bass (32-step, 2-bar Am loop)
+  const BASS=[
+    A2,0,A2,0, C3,0,E3,0, A2,0,A2,0, G3,0,E3,0,
+    F3,0,F3,0, A3,0,C4,0, F3,0,E3,0, A2,0,A2,0,
+  ];
+
+  // Arp melody — A-minor pentatonic, plays every 8th note
+  const ARP=[A4,E4,G4,A4, C4,E4,G4,A4, F4,A4,C4,E4, E4,G4,A4,E4];
+
+  // ── Instrument voices ────────────────────────────────────────────
+  function doKick(t){
+    const o=AC.createOscillator(),g=AC.createGain();
+    o.type='sine';
+    o.frequency.setValueAtTime(115,t); o.frequency.exponentialRampToValueAtTime(42,t+0.09);
+    g.gain.setValueAtTime(1.5,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.28);
+    o.connect(g); g.connect(_mMaster); o.start(t); o.stop(t+0.28);
+  }
+
+  function doSnare(t){
+    const len=Math.ceil(AC.sampleRate*0.13);
+    const buf=AC.createBuffer(1,len,AC.sampleRate),d=buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+    const n=AC.createBufferSource(); n.buffer=buf;
+    const ng=AC.createGain();
+    ng.gain.setValueAtTime(0.5,t); ng.gain.exponentialRampToValueAtTime(0.001,t+0.13);
+    n.connect(ng); ng.connect(_mMaster); n.start(t); n.stop(t+0.13);
+    const o=AC.createOscillator(),og=AC.createGain();
+    o.type='triangle'; o.frequency.value=210;
+    og.gain.setValueAtTime(0.3,t); og.gain.exponentialRampToValueAtTime(0.001,t+0.06);
+    o.connect(og); og.connect(_mMaster); o.start(t); o.stop(t+0.06);
+  }
+
+  function doHat(t,open){
+    const dur=open?0.14:0.032;
+    const len=Math.ceil(AC.sampleRate*dur);
+    const buf=AC.createBuffer(1,len,AC.sampleRate),d=buf.getChannelData(0);
+    for(let i=0;i<len;i++) d[i]=Math.random()*2-1;
+    const n=AC.createBufferSource(); n.buffer=buf;
+    const f=AC.createBiquadFilter(); f.type='highpass'; f.frequency.value=7800;
+    const g=AC.createGain();
+    g.gain.setValueAtTime(open?0.16:0.09,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    n.connect(f); f.connect(g); g.connect(_mMaster); n.start(t); n.stop(t+dur);
+  }
+
+  function doBass(t,freq){
+    const dur=_STEP*1.82;
+    const o1=AC.createOscillator(),o2=AC.createOscillator();
+    const flt=AC.createBiquadFilter(),g=AC.createGain();
+    o1.type='sawtooth'; o1.frequency.value=freq;
+    o2.type='sawtooth'; o2.frequency.value=freq*1.007; // slight detune
+    flt.type='lowpass'; flt.Q.value=6;
+    flt.frequency.setValueAtTime(520,t); flt.frequency.exponentialRampToValueAtTime(160,t+dur);
+    g.gain.setValueAtTime(0.44,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    o1.connect(flt); o2.connect(flt); flt.connect(g); g.connect(_mMaster);
+    o1.start(t); o1.stop(t+dur); o2.start(t); o2.stop(t+dur);
+  }
+
+  function doArp(t,freq){
+    const dur=_STEP*1.55;
+    const o=AC.createOscillator(),g=AC.createGain();
+    o.type='square'; o.frequency.value=freq;
+    g.gain.setValueAtTime(0.065,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    o.connect(g); g.connect(_mDly); g.connect(_mMaster); // send to delay bus
+    o.start(t); o.stop(t+dur);
+  }
+
+  // ── Lookahead scheduler ─────────────────────────────────────────
+  _mNextT=AC.currentTime+0.05; _mStep=0;
+  function schedule(){
+    while(_mNextT < AC.currentTime+0.14){
+      const s=_mStep%16, s32=_mStep%32, t=_mNextT;
+      if(K[s]) doKick(t);
+      if(S[s]) doSnare(t);
+      if(H[s]) doHat(t,false);
+      if(O[s]) doHat(t,true);
+      const bf=BASS[s32]; if(bf) doBass(t,bf);
+      if(s%2===0) doArp(t, ARP[Math.floor(s32/2)%ARP.length]);
+      _mStep++; _mNextT+=_STEP;
+    }
+    if(_mPlaying) _mTimerID=setTimeout(schedule,35);
+  }
+  schedule();
+}
+
+function stopMusic(){
+  _mPlaying=false; clearTimeout(_mTimerID);
+  if(_mMaster) _mMaster.gain.setTargetAtTime(0,AC.currentTime,0.4);
+}
+
 // ═══ HASH ════════════════════════════════════════════════════════
 function hash(a,b=0){ let h=(a*1597+b*51749)|0; h=((h^(h>>>13))*1664525+1013904223)|0; return ((h>>>0)%10000)/10000; }
 
@@ -183,6 +311,7 @@ function newGame(){
     // active power-up
     pu:null, puTimer:0,
     shield:false, magnet:false, ghost:false, nitroBase:0,
+    ghostCharges:0,   // stored ghost uses, activated manually
 
     cars:[],        // same-direction traffic
     coinItems:[],
@@ -203,11 +332,12 @@ function newGame(){
 window.addEventListener('keydown', e => {
   if(['Space','ArrowUp','ArrowDown','KeyW','KeyS'].includes(e.code)) e.preventDefault();
   if(e.code==='Escape' && G?.state==='playing'){ G.paused=!G.paused; return; }
-  if(['Space'].includes(e.code) && G?.state!=='playing'){ handleStart(); return; }
+  if(e.code==='Space' && G?.state!=='playing'){ handleStart(); return; }
   if(G?.state==='playing' && !G.paused){
     const p=G.player;
     if((e.code==='ArrowUp'||e.code==='KeyW')   && p.lane>0)        { p.lane--; sfxHonk(); }
     if((e.code==='ArrowDown'||e.code==='KeyS') && p.lane<LANES-1)  { p.lane++; sfxHonk(); }
+    if(e.code==='Space') deployGhost();
   }
 });
 canvas.addEventListener('pointerdown', e => {
@@ -219,7 +349,7 @@ canvas.addEventListener('pointerdown', e => {
   if(cy < H/2 && p.lane>0)        { p.lane--; sfxHonk(); }
   if(cy >= H/2 && p.lane<LANES-1) { p.lane++; sfxHonk(); }
 });
-function handleStart(){ ensureAudio(); if(G.state!=='playing'){newGame();G.state='playing';} }
+function handleStart(){ ensureAudio(); if(G.state!=='playing'){newGame();G.state='playing'; startMusic();} }
 
 // ═══ PARTICLES ═══════════════════════════════════════════════════
 function spawnParts(x,y,n,col){
@@ -463,10 +593,26 @@ function busted(){
 }
 
 function activatePU(type){
+  if(type==='ghost'){
+    // Ghost is stored as a charge — player deploys manually with SPACE
+    G.ghostCharges = Math.min(G.ghostCharges + 1, 3);
+    sfxPU();
+    G.toasts.push({msg:'👻 Ghost stored! Press SPACE to activate',timer:2.5});
+    return;
+  }
   G.pu=type; G.puTimer=PU_DEFS[type].dur;
-  G.shield=type==='shield'; G.magnet=type==='magnet'; G.ghost=type==='ghost';
+  G.shield=type==='shield'; G.magnet=type==='magnet';
   if(type==='nitro') sfxNitro(); else sfxPU();
   G.toasts.push({msg:`${PU_DEFS[type].icon} ${PU_DEFS[type].label} activated!`,timer:2});
+}
+
+function deployGhost(){
+  if(G.ghostCharges <= 0 || G.ghost) return;
+  G.ghostCharges--;
+  G.pu='ghost'; G.puTimer=PU_DEFS.ghost.dur;
+  G.ghost=true;
+  sfxPU();
+  G.toasts.push({msg:'👻 GHOST activated!',timer:2});
 }
 
 // ═══ DRAW ════════════════════════════════════════════════════════
@@ -919,6 +1065,26 @@ function drawHUD(){
     ctx.fillStyle='white'; ctx.font="bold 11px 'Kenney Rocket', monospace";
     ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(`${def.icon} ${def.label}`,W/2,BY+BH+4+8);
+  }
+
+  // ── Ghost charge indicator (bottom centre) ──
+  if(G.state==='playing'){
+    ctx.textAlign='center'; ctx.textBaseline='bottom';
+    if(G.ghostCharges > 0 && !G.ghost){
+      const pulse = 0.7 + 0.3 * Math.sin(Date.now()/300);
+      ctx.save(); ctx.globalAlpha=pulse;
+      ctx.font="bold 12px 'Kenney Rocket', monospace";
+      ctx.fillStyle='#aaffcc';
+      const dots = '👻'.repeat ? '👻 '.repeat(G.ghostCharges).trim() : G.ghostCharges+'×👻';
+      ctx.fillText(`${dots}   SPACE to activate ghost`, W/2, H-6);
+      ctx.restore();
+    } else if(G.ghostCharges === 0 && !G.ghost){
+      ctx.save(); ctx.globalAlpha=0.22;
+      ctx.font="11px 'Kenney Rocket', monospace";
+      ctx.fillStyle='white';
+      ctx.fillText('collect 👻 for ghost mode', W/2, H-6);
+      ctx.restore();
+    }
   }
 }
 
