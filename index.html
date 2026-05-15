@@ -379,7 +379,7 @@ const CAR_ACCEL      = 70;    // px/s² re-acceleration when clear
 
 // ═══ SKY / TIME-OF-DAY ═══════════════════════════════════════════
 // phase 0=day  0.5=dusk  1=night  (driven by G.camera distance)
-function getSkyPhase(){ return Math.min(1, Math.max(0,(G.camera-4000)/13000)); }
+function getSkyPhase(){ return 1; } // NFS Underground — always midnight
 function lerpC(a,b,t){ return Math.round(a+(b-a)*t); }
 function lerpCol(a,b,t){ return `rgb(${lerpC(a[0],b[0],t)},${lerpC(a[1],b[1],t)},${lerpC(a[2],b[2],t)})`; }
 
@@ -401,7 +401,7 @@ function newGame(){
     best: G ? G.best : 0,
     elapsed:0, speed:215,
     camera:0,
-    paused:false, flash:0,
+    paused:false, flash:0, gearFlash:0, gearMark:265,
 
     player:{ lane:1, y:laneCenter(1), lives:3, invuln:0, dead:false, deadT:0 },
 
@@ -484,6 +484,10 @@ function update(ts){
   G.score = Math.floor(G.camera/10) + G.coins*10 + G.bonusPoints;
   if(G.score>G.best) G.best=G.score;
   G.flash = Math.max(0,G.flash-rawDt*4);
+  G.gearFlash = Math.max(0,G.gearFlash-rawDt*5);
+  // Gear shift flash at every 50 km/h milestone
+  const gStep=50, gMark=Math.floor(G.speed/gStep)*gStep;
+  if(gMark>=270 && gMark>G.gearMark){ G.gearFlash=1; G.gearMark=gMark; }
 
   const p=G.player;
 
@@ -824,8 +828,34 @@ function draw(){
   drawParticles();
   drawSpeedLines();
   if(shook) ctx.restore();
+
+  // ── Nitro purple vignette ──────────────────────────────────────
+  if(G.pu==='nitro'){
+    const nPct=Math.max(0,G.puTimer/PU_DEFS.nitro.dur);
+    const nvA=(0.55*nPct).toFixed(2);
+    const nvg=ctx.createRadialGradient(W/2,H/2,H*0.18,W/2,H/2,H*0.82);
+    nvg.addColorStop(0,'rgba(60,0,120,0)');
+    nvg.addColorStop(0.55,'rgba(60,0,120,0)');
+    nvg.addColorStop(1,`rgba(140,0,255,${nvA})`);
+    ctx.fillStyle=nvg; ctx.fillRect(0,0,W,H);
+    // Faint full-screen purple tint
+    ctx.fillStyle=`rgba(100,0,200,${(nPct*0.10).toFixed(2)})`; ctx.fillRect(0,0,W,H);
+  }
+
+  // ── Tunnel vision at high speed ───────────────────────────────
+  if(G.speed>340){
+    const tvA=Math.min(0.72,(G.speed-340)/110*0.72);
+    const tvg=ctx.createRadialGradient(W/2,H/2,H*0.16,W/2,H/2,H*0.80);
+    tvg.addColorStop(0,'rgba(0,0,0,0)');
+    tvg.addColorStop(0.50,'rgba(0,0,0,0)');
+    tvg.addColorStop(1,`rgba(0,0,0,${tvA.toFixed(2)})`);
+    ctx.fillStyle=tvg; ctx.fillRect(0,0,W,H);
+  }
+
   // HUD always stable
   drawHUD();
+  // Gear shift cyan flash
+  if(G.gearFlash>0){ ctx.fillStyle=`rgba(0,238,255,${(G.gearFlash*0.22).toFixed(2)})`; ctx.fillRect(0,0,W,H); }
   if(G.flash>0){ ctx.fillStyle=`rgba(220,0,0,${(G.flash*0.32).toFixed(2)})`; ctx.fillRect(0,0,W,H); }
   if(G.paused)             drawPause();
   if(G.state==='start')    drawStart();
@@ -836,43 +866,28 @@ function draw(){
 
 // ── Sky (day → dusk → night) ──────────────────────────────────
 function drawSky(){
-  const ph = getSkyPhase();
-  // Color stops: day, dusk, night
-  const DAY_T  = [90,138,170],  DAY_B  = [154,184,204];
-  const DUSK_T = [180,75,35],   DUSK_B = [220,130,70];
-  const NITE_T = [8,8,24],      NITE_B = [22,22,55];
-  let top, bot;
-  if(ph < 0.5){ const t=ph*2;
-    top=lerpCol(DAY_T,DUSK_T,t); bot=lerpCol(DAY_B,DUSK_B,t);
-  } else { const t=(ph-0.5)*2;
-    top=lerpCol(DUSK_T,NITE_T,t); bot=lerpCol(DUSK_B,NITE_B,t);
-  }
-  const g=ctx.createLinearGradient(0,0,0,BLD_BOT);
-  g.addColorStop(0,top); g.addColorStop(1,bot);
-  ctx.fillStyle=g; ctx.fillRect(0,0,W,BLD_BOT);
+  // NFS Underground — permanent pitch-black midnight
+  const skyG=ctx.createLinearGradient(0,0,0,BLD_BOT);
+  skyG.addColorStop(0,'#03030c');
+  skyG.addColorStop(0.6,'#07041a');
+  skyG.addColorStop(1,'#100820');
+  ctx.fillStyle=skyG; ctx.fillRect(0,0,W,BLD_BOT);
 
-  // Stars (appear after dusk)
-  if(ph > 0.55){
-    const sa=Math.min(1,(ph-0.55)/0.3)*0.85;
-    ctx.fillStyle=`rgba(255,255,255,${sa})`;
-    for(let i=0;i<35;i++){
-      const sx=hash(i*17,3)*W, sy=hash(i*17,7)*BLD_BOT*0.85;
-      const sz=0.4+hash(i*17,11)*1.4;
-      // Twinkle
-      const tw=0.5+0.5*Math.sin(G.elapsed*2.5+i*1.3);
-      ctx.globalAlpha=sa*tw; ctx.beginPath(); ctx.arc(sx,sy,sz,0,Math.PI*2); ctx.fill();
-    }
-    ctx.globalAlpha=1;
-  }
+  // City light pollution on horizon — faint purple/magenta glow
+  const hglow=ctx.createLinearGradient(0,BLD_BOT-40,0,BLD_BOT);
+  hglow.addColorStop(0,'rgba(80,20,140,0)');
+  hglow.addColorStop(1,'rgba(120,30,180,0.28)');
+  ctx.fillStyle=hglow; ctx.fillRect(0,BLD_BOT-40,W,40);
 
-  // Dusk sun/glow on horizon
-  if(ph > 0.1 && ph < 0.75){
-    const da=Math.sin(ph/0.75*Math.PI)*0.45;
-    const dg=ctx.createRadialGradient(W*0.75,BLD_BOT,0,W*0.75,BLD_BOT,90);
-    dg.addColorStop(0,`rgba(255,180,60,${da})`);
-    dg.addColorStop(1,'rgba(255,100,20,0)');
-    ctx.fillStyle=dg; ctx.fillRect(0,0,W,BLD_BOT);
+  // Stars — always visible, twinkle
+  for(let i=0;i<45;i++){
+    const sx=hash(i*17,3)*W, sy=hash(i*17,7)*BLD_BOT*0.90;
+    const sz=0.4+hash(i*17,11)*1.5;
+    const tw=0.45+0.55*Math.sin(G.elapsed*2.2+i*1.4);
+    ctx.globalAlpha=tw*0.9; ctx.fillStyle='#ffffff';
+    ctx.beginPath(); ctx.arc(sx,sy,sz,0,Math.PI*2); ctx.fill();
   }
+  ctx.globalAlpha=1;
 }
 
 // ── Far buildings (parallax 0.25×, dark silhouettes) ─────────
@@ -882,7 +897,7 @@ function drawBldFar(){
     const sx=b.wx-off;
     if(sx>W+5||sx+b.w<-5) continue;
     const bh=Math.round(b.h*0.50);
-    ctx.fillStyle='#4a5e6e';
+    ctx.fillStyle='#0e1018';
     ctx.fillRect(sx,BLD_BOT-bh,b.w,bh);
     // Simple windows
     ctx.fillStyle='rgba(255,240,160,0.20)';
@@ -915,22 +930,36 @@ function drawBldNear(){
       }
     ctx.restore();
 
-    // Windows (floor-by-floor) — more lit at night
+    // Windows (floor-by-floor) — more lit at night with colour variety
     const nightPh=getSkyPhase();
-    const litThresh=0.42 - nightPh*0.28; // more lit windows as night approaches
-    const glowA=0.18+nightPh*0.32;       // stronger glow at night
+    const litThresh=0.40 - nightPh*0.30; // many more lit windows as night deepens
+    const glowA=0.20+nightPh*0.50;       // strong warm glow halo at night
     const floorH=Math.round((b.h-24)/b.floors);
     const wW=9,wH=11,wGX=17,wPX=9;
     const cols=Math.max(1,Math.floor((b.w-wPX*2)/wGX));
+    // Window colour palette: warm yellow, cool blue-white, amber, warm white
+    const winCols=['#f8e890','#d0e8ff','#ffc870','#fff8e0','#e8d0ff'];
+    const winGlows=['rgba(255,220,80,','rgba(160,210,255,','rgba(255,180,60,','rgba(255,240,180,','rgba(200,160,255,'];
     for(let fl=0;fl<b.floors;fl++){
       const fy=BLD_BOT-b.h+12+fl*floorH;
       for(let c=0;c<cols;c++){
         const wx2=sx+wPX+c*wGX, wy2=fy+4;
         if(wy2+wH>BLD_BOT-22) continue;
-        const lit=hash((b.wx+fl*100)|0,(c*17+b.s)|0)>litThresh;
-        ctx.fillStyle=lit?'#f0d890':st.win;
+        const litH=hash((b.wx+fl*100)|0,(c*17+b.s)|0);
+        const lit=litH>litThresh;
+        if(!lit){ ctx.fillStyle=st.win; ctx.fillRect(wx2,wy2,wW,wH); continue; }
+        // Pick colour from palette deterministically
+        const ci=Math.floor(hash((b.wx+c*31)|0,(fl*13)|0)*winCols.length);
+        ctx.fillStyle=winCols[ci];
         ctx.fillRect(wx2,wy2,wW,wH);
-        if(lit){ ctx.fillStyle=`rgba(255,220,80,${glowA})`; ctx.fillRect(wx2-2,wy2-2,wW+4,wH+4); }
+        if(nightPh>0.05){
+          // Outer soft glow halo — bleeds onto building face
+          ctx.fillStyle=`${winGlows[ci]}${(glowA*0.55).toFixed(2)})`;
+          ctx.fillRect(wx2-3,wy2-3,wW+6,wH+6);
+          // Stronger inner bloom
+          ctx.fillStyle=`${winGlows[ci]}${(glowA*0.30).toFixed(2)})`;
+          ctx.fillRect(wx2-6,wy2-5,wW+12,wH+10);
+        }
       }
     }
 
@@ -966,14 +995,14 @@ function drawBldNear(){
 
 // ── Sidewalk top ──────────────────────────────────────────────
 function drawSidewalkTop(){
-  ctx.fillStyle='#b0b8c4'; ctx.fillRect(0,BLD_BOT,W,ROAD_Y-BLD_BOT);
+  ctx.fillStyle='#0c0c18'; ctx.fillRect(0,BLD_BOT,W,ROAD_Y-BLD_BOT);
   // Tile overlay
   const ts=18; ctx.save(); ctx.globalAlpha=0.30;
   for(let tx=-(G.camera%ts);tx<W+ts;tx+=ts)
     if(IMG.bld_face0) ctx.drawImage(IMG.bld_face0,0,0,16,16,tx,BLD_BOT,ts,ROAD_Y-BLD_BOT);
   ctx.restore();
   // Kerb
-  ctx.fillStyle='#8a9098'; ctx.fillRect(0,ROAD_Y-4,W,4);
+  ctx.fillStyle='#0a0a14'; ctx.fillRect(0,ROAD_Y-4,W,4);
 
   // Props (scroll at full speed)
   for(const prop of G.props){
@@ -1006,7 +1035,7 @@ function drawProp(type,sx){
 
 // ── Road ──────────────────────────────────────────────────────
 function drawRoad(){
-  ctx.fillStyle='#32383f'; ctx.fillRect(0,ROAD_Y,W,ROAD_H);
+  ctx.fillStyle='#07070f'; ctx.fillRect(0,ROAD_Y,W,ROAD_H);
 
   // Lane dividers (dashed, scroll left)
   const dashL=48,gap=30,period=dashL+gap;
@@ -1020,12 +1049,51 @@ function drawRoad(){
   ctx.fillStyle='rgba(255,255,200,0.85)';
   ctx.fillRect(0,ROAD_Y,W,3);
   ctx.fillRect(0,ROAD_Y+ROAD_H-3,W,3);
+
+  // ── Neon puddle reflections on wet road ──────────────────────
+  const nightPh2=getSkyPhase();
+  if(nightPh2>0.05){
+    const pAlpha=(G.weather==='rain'?0.80:0.55)*nightPh2;
+    // Neon palette — mirrors sign colours in city
+    const NEON=[
+      [255,45,120],[0,255,200],[255,153,0],[200,68,255],[0,207,255],[170,255,0],[255,102,0]
+    ];
+    const spacing=210;
+    const startI=Math.floor((G.camera-100)/spacing);
+    const endI  =Math.ceil ((G.camera+W+100)/spacing);
+    ctx.save();
+    ctx.globalCompositeOperation='lighter';
+    for(let i=startI;i<=endI;i++){
+      const wx=i*spacing + hash(i,3)*140;
+      const sx=wx-G.camera;
+      if(sx<-90||sx>W+90) continue;
+      const lane=Math.floor(hash(i,7)*3);
+      const py=ROAD_Y+lane*LANE_H+LANE_H*0.3+hash(i,11)*LANE_H*0.42;
+      const nc=NEON[Math.floor(hash(i,13)*NEON.length)];
+      const [r,g,b]=nc;
+      const rw=32+hash(i,17)*42, rh=7+hash(i,19)*10;
+      // Puddle ellipse
+      const pg=ctx.createRadialGradient(sx,py,1,sx,py,rw);
+      pg.addColorStop(0,  `rgba(${r},${g},${b},${(pAlpha*1.1).toFixed(2)})`);
+      pg.addColorStop(0.5,`rgba(${r},${g},${b},${(pAlpha*0.5).toFixed(2)})`);
+      pg.addColorStop(1,  `rgba(${r},${g},${b},0)`);
+      ctx.fillStyle=pg;
+      ctx.beginPath(); ctx.ellipse(sx,py,rw,rh,0,0,Math.PI*2); ctx.fill();
+      // Vertical streak up from puddle to road top (sign reflection)
+      const stG=ctx.createLinearGradient(sx,ROAD_Y+4,sx,py-rh);
+      stG.addColorStop(0,`rgba(${r},${g},${b},${(pAlpha*0.35).toFixed(2)})`);
+      stG.addColorStop(1,`rgba(${r},${g},${b},0)`);
+      ctx.fillStyle=stG;
+      ctx.fillRect(sx-6,ROAD_Y+4,12,Math.max(0,py-rh-ROAD_Y-4));
+    }
+    ctx.restore();
+  }
 }
 
 // ── Bottom sidewalk ───────────────────────────────────────────
 function drawSidewalkBot(){
-  ctx.fillStyle='#8a9098'; ctx.fillRect(0,SWLK_BOT,W,4);
-  ctx.fillStyle='#a8b0bc'; ctx.fillRect(0,SWLK_BOT+4,W,H-SWLK_BOT-4);
+  ctx.fillStyle='#0a0a14'; ctx.fillRect(0,SWLK_BOT,W,4);
+  ctx.fillStyle='#0c0c1a'; ctx.fillRect(0,SWLK_BOT+4,W,H-SWLK_BOT-4);
   const ts=18; ctx.save(); ctx.globalAlpha=0.25;
   for(let tx=-(G.camera%ts);tx<W+ts;tx+=ts)
     if(IMG.bld_face1) ctx.drawImage(IMG.bld_face1,0,0,16,16,tx,SWLK_BOT+4,ts,ts);
@@ -1149,7 +1217,16 @@ function drawPlayer(){
     ctx.beginPath(); ctx.ellipse(PLAYER_X,p.y,PW/2+8,PH/2+8,0,0,Math.PI*2); ctx.stroke();
   }
 
-  // Shadow
+  // Underglow — NFS cyan pool beneath car
+  const ugY=sy+PH+1;
+  const ugR=PW*0.82;
+  const ug=ctx.createRadialGradient(PLAYER_X,ugY,2,PLAYER_X,ugY,ugR);
+  ug.addColorStop(0,'rgba(0,240,255,0.52)');
+  ug.addColorStop(0.4,'rgba(0,180,255,0.22)');
+  ug.addColorStop(1,'rgba(0,100,255,0)');
+  ctx.fillStyle=ug;
+  ctx.beginPath(); ctx.ellipse(PLAYER_X,ugY,ugR,12,0,0,Math.PI*2); ctx.fill();
+  // Shadow on top of underglow
   ctx.fillStyle='rgba(0,0,0,0.20)';
   ctx.beginPath(); ctx.ellipse(PLAYER_X,sy+PH+2,PW/2-6,5,0,0,Math.PI*2); ctx.fill();
 
@@ -1211,13 +1288,33 @@ function drawParticles(){
 }
 
 function drawRain(){
-  if(!G.rainDrops||!G.rainDrops.length) return;
+  const nightPh=getSkyPhase();
+  const isRain=G.weather==='rain';
+  // Drizzle always present at night; heavy rain during rain weather
+  const drizzleA = isRain ? 0.55 : (nightPh>0.25 ? 0.18*nightPh : 0);
+  if(drizzleA<=0) return;
   ctx.save();
-  ctx.strokeStyle='rgba(180,210,255,0.45)'; ctx.lineWidth=1;
-  for(const d of G.rainDrops){
-    ctx.beginPath(); ctx.moveTo(d.x,d.y); ctx.lineTo(d.x-5,d.y+14); ctx.stroke();
+  // Heavy rain streaks (only during actual rain weather)
+  if(isRain && G.rainDrops && G.rainDrops.length){
+    ctx.strokeStyle=`rgba(180,210,255,${(drizzleA*0.85).toFixed(2)})`; ctx.lineWidth=1;
+    for(const d of G.rainDrops){
+      ctx.beginPath(); ctx.moveTo(d.x,d.y); ctx.lineTo(d.x-5,d.y+14); ctx.stroke();
+    }
+    // Subtle blue-grey wash
+    ctx.fillStyle=`rgba(60,100,200,${(nightPh*0.06).toFixed(2)})`; ctx.fillRect(0,0,W,H);
   }
-  ctx.fillStyle='rgba(60,100,200,0.05)'; ctx.fillRect(0,0,W,H);
+  // Atmospheric fine drizzle — always at night (lighter than heavy rain)
+  const dropCount = isRain ? 140 : Math.floor(55*nightPh);
+  ctx.strokeStyle=`rgba(200,220,255,${(drizzleA*0.55).toFixed(2)})`; ctx.lineWidth=0.7;
+  // Use camera+elapsed as seed so drops move but aren't random each frame
+  const seed=Math.floor(G.elapsed*55);
+  for(let i=0;i<dropCount;i++){
+    const hx=hash(i*31,seed+i);
+    const hy=hash(i*17,seed+i+7);
+    const dx=((hx*W + G.camera*0.3)%W+W)%W;
+    const dy=((hy*H + G.elapsed*220*0.7)%H+H)%H;
+    ctx.beginPath(); ctx.moveTo(dx,dy); ctx.lineTo(dx-3,dy+10); ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -1253,9 +1350,9 @@ function drawHUD(){
   const BX=10, BY=8, BW=780, BH=32, CY=BY+BH/2;
 
   // ── Single unified top bar ──
-  ctx.fillStyle='rgba(8,10,18,0.82)';
+  ctx.fillStyle='rgba(4,6,14,0.92)';
   ctx.beginPath(); ctx.roundRect(BX,BY,BW,BH,8); ctx.fill();
-  ctx.strokeStyle='rgba(255,255,255,0.10)'; ctx.lineWidth=1;
+  ctx.strokeStyle='rgba(0,238,255,0.22)'; ctx.lineWidth=1;
   ctx.beginPath(); ctx.roundRect(BX,BY,BW,BH,8); ctx.stroke();
 
   ctx.textBaseline='middle';
@@ -1266,14 +1363,14 @@ function drawHUD(){
   // ── SCORE ──
   ctx.textAlign='left';
   ctx.fillStyle='rgba(255,255,255,0.40)'; ctx.fillText('SCORE', BX+PAD, CY);
-  ctx.fillStyle='#ffd700';               ctx.fillText(String(G.score).padStart(6,'0'), BX+PAD+62, CY);
+  ctx.fillStyle='#00eeff';               ctx.fillText(String(G.score).padStart(6,'0'), BX+PAD+62, CY);
 
   // divider
   ctx.fillStyle='rgba(255,255,255,0.14)'; ctx.fillRect(BX+PAD+128, BY+7, 1, BH-14);
 
   // ── COINS ──
   ctx.fillStyle='rgba(255,255,255,0.40)'; ctx.fillText('COINS', BX+PAD+140, CY);
-  ctx.fillStyle='#55ddaa';               ctx.fillText(G.coins,   BX+PAD+202, CY);
+  ctx.fillStyle='#00eeff';               ctx.fillText(G.coins,   BX+PAD+202, CY);
 
   // divider
   ctx.fillStyle='rgba(255,255,255,0.14)'; ctx.fillRect(BX+PAD+262, BY+7, 1, BH-14);
@@ -1291,7 +1388,7 @@ function drawHUD(){
   // ── SPEED ──
   const spdN=Math.floor(G.speed);
   const spdPct=Math.max(0,Math.min(1,G.speed/450));
-  const spdCol=`hsl(${Math.round(120-spdPct*120)},90%,55%)`;
+  const spdCol= spdPct<0.45 ? '#00eeff' : spdPct<0.75 ? '#ffcc00' : '#ff3322';
   ctx.font="bold 13px 'Kenney Rocket', monospace"; ctx.textAlign='right';
   ctx.fillStyle=spdCol;
   ctx.fillText(`${spdN} km/h`, BX+BW-PAD, CY);
@@ -1366,7 +1463,7 @@ function drawToasts(){
     ctx.beginPath(); ctx.roundRect(W/2-tw/2,y-15,tw,30,6); ctx.fill();
     ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1;
     ctx.beginPath(); ctx.roundRect(W/2-tw/2,y-15,tw,30,6); ctx.stroke();
-    ctx.fillStyle='#ffd700'; ctx.textBaseline='middle'; ctx.fillText(t.msg,W/2,y);
+    ctx.fillStyle='#00eeff'; ctx.textBaseline='middle'; ctx.fillText(t.msg,W/2,y);
     ctx.restore(); y-=38;
   }
 }
@@ -1423,9 +1520,9 @@ function drawDead(){
   // Divider
   ctx.fillStyle='rgba(200,0,0,0.3)'; ctx.fillRect(W/2-180,H/2-42,360,1);
 
-  ctx.fillStyle='#ffd700'; ctx.font="bold 20px 'Kenney Rocket', monospace";
+  ctx.fillStyle='#00eeff'; ctx.font="bold 20px 'Kenney Rocket', monospace";
   ctx.fillText(`SCORE   ${G.score}`,W/2,H/2-16);
-  ctx.fillStyle='#55ddaa'; ctx.font="bold 16px 'Kenney Rocket', monospace";
+  ctx.fillStyle='rgba(0,238,255,0.65)'; ctx.font="bold 16px 'Kenney Rocket', monospace";
   ctx.fillText(`BEST    ${G.best}`,W/2,H/2+10);
   ctx.fillStyle='rgba(200,200,220,0.6)'; ctx.font="13px 'Kenney Rocket', monospace";
   ctx.fillText(`COINS COLLECTED  ${G.coins}`,W/2,H/2+36);
@@ -1449,9 +1546,9 @@ function drawBusted(){
 
   ctx.fillStyle='rgba(200,0,0,0.3)'; ctx.fillRect(W/2-180,H/2+4,360,1);
 
-  ctx.fillStyle='#ffd700'; ctx.font="bold 20px 'Kenney Rocket', monospace";
+  ctx.fillStyle='#00eeff'; ctx.font="bold 20px 'Kenney Rocket', monospace";
   ctx.fillText('SCORE   '+String(G.score),W/2,H/2+24);
-  ctx.fillStyle='#55ddaa'; ctx.font="bold 16px 'Kenney Rocket', monospace";
+  ctx.fillStyle='rgba(0,238,255,0.65)'; ctx.font="bold 16px 'Kenney Rocket', monospace";
   ctx.fillText('BEST    '+String(G.best),W/2,H/2+48);
 
   const pulse=0.55+0.45*Math.sin(Date.now()/400);
