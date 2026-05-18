@@ -116,6 +116,7 @@ const sfxCoin    = () => { tone(880,'sine',0.08,0.10); tone(1320,'sine',0.06,0.0
 const sfxCrash   = () => { noise(0.45,900,60,0.22); tone(100,'sawtooth',0.4,0.1,40); };
 const sfxHonk    = () => tone(340,'sawtooth',0.07,0.06,280);
 const sfxPU      = () => [440,554,659,880].forEach((f,i)=>tone(f,'sine',0.11,0.12,null,i*0.06));
+const sfxLife    = () => { tone(330,'sine',0.08,0.14); tone(440,'sine',0.10,0.14,null,0.10); tone(554,'sine',0.12,0.14,null,0.20); tone(880,'sine',0.16,0.20,null,0.30); };
 const sfxShield  = () => { tone(80,'sine',0.18,0.16,40); noise(0.14,180,50,0.13); };
 const sfxNitro   = () => { noise(0.12,400,800,0.15); tone(220,'sawtooth',0.2,0.08,440); };
 
@@ -390,6 +391,7 @@ const PU_DEFS = {
   magnet: { icon:'🧲',  label:'MAGNET',  col:'#ff44cc', dur:7 },
   ghost:  { icon:'👻',  label:'GHOST',   col:'#aaffcc', dur:5 },
   emp:    { icon:'⚡',  label:'EMP',     col:'#88ffff', dur:3 },
+  medkit: { icon:'❤️',  label:'MEDKIT',  col:'#ff2244', dur:0 },
 };
 const PU_KEYS = ['shield','nitro','magnet','ghost','emp'];
 
@@ -397,7 +399,7 @@ const PU_KEYS = ['shield','nitro','magnet','ghost','emp'];
 let G;
 function newGame(){
   G = {
-    state:'start', score:0, coins:0,
+    state:'start', score:0, coins:0, lifeCoinMark:25,
     best: G ? G.best : 0,
     elapsed:0, speed:215,
     camera:0,
@@ -416,7 +418,7 @@ function newGame(){
     parts:[],
     toasts:[],
 
-    spawnCarT:0, coinT:0, puT:0,
+    spawnCarT:0, coinT:0, puT:0, medkitT:35+Math.random()*20,
     waveDense:false, waveTimer:10+Math.random()*5,
 
     combo:0, comboTimer:0, bonusPoints:0,  // near-miss combo
@@ -664,6 +666,13 @@ function update(ts){
     G.puItems.push({ worldX:G.camera+W+120, lane, type, got:false });
     G.puT=8+Math.random()*6;
   }
+  // ── Rare medkit spawn (independent timer, ~35-60s apart) ──────
+  G.medkitT-=dt;
+  if(G.medkitT<=0){
+    const lane=Math.floor(Math.random()*LANES);
+    G.puItems.push({ worldX:G.camera+W+140, lane, type:'medkit', got:false });
+    G.medkitT=35+Math.random()*25;
+  }
 
   // ── Collect coins ─────────────────────────────────────────────
   for(const c of G.coinItems){
@@ -676,7 +685,21 @@ function update(ts){
       const pull=Math.min(1,dt*8);
       c.worldX += (G.camera+PLAYER_X-c.worldX)*pull;
     }
-    if(Math.abs(sx-PLAYER_X)<32 && Math.abs(cy-p.y)<30){ c.got=true; G.coins++; sfxCoin(); }
+    if(Math.abs(sx-PLAYER_X)<32 && Math.abs(cy-p.y)<30){
+      c.got=true; G.coins++; sfxCoin();
+      // ── Coin milestone → restore life ──────────────────────────
+      if(G.coins >= G.lifeCoinMark){
+        G.lifeCoinMark += 25;
+        if(p.lives < 3){
+          p.lives++;
+          sfxLife();
+          spawnParts(PLAYER_X, p.y, 16, '#ff2244');
+          G.toasts.push({msg:'❤️ +1 LIFE! (every 25 coins)', timer:2.8});
+        } else {
+          G.toasts.push({msg:'❤️ Full health — keep it up!', timer:1.8});
+        }
+      }
+    }
   }
 
   // ── Collect power-ups ─────────────────────────────────────────
@@ -778,6 +801,19 @@ function busted(){
 }
 
 function activatePU(type){
+  if(type==='medkit'){
+    const p=G.player;
+    if(p.lives < 3){
+      p.lives++;
+      sfxLife();
+      spawnParts(PLAYER_X, p.y, 20, '#ff2244');
+      G.toasts.push({msg:'❤️ +1 LIFE!', timer:2.8});
+    } else {
+      sfxPU();
+      G.toasts.push({msg:'❤️ Full health!', timer:1.8});
+    }
+    return;
+  }
   if(type==='emp'){
     G.emp=true; G.empTimer=PU_DEFS.emp.dur;
     sfxPU();
@@ -1384,6 +1420,11 @@ function drawHUD(){
   // ── COINS ──
   ctx.fillStyle='rgba(255,255,255,0.40)'; ctx.fillText('COINS', BX+PAD+140, CY);
   ctx.fillStyle='#00eeff';               ctx.fillText(G.coins,   BX+PAD+202, CY);
+  // Small ❤️ milestone progress hint
+  const coinsToLife = G.lifeCoinMark - G.coins;
+  ctx.fillStyle='rgba(255,80,80,0.50)'; ctx.font="10px 'Kenney Rocket',monospace";
+  ctx.fillText(`❤️${coinsToLife}`, BX+PAD+228, CY);
+  ctx.font="bold 12px 'Kenney Rocket', monospace";
 
   // divider
   ctx.fillStyle='rgba(255,255,255,0.14)'; ctx.fillRect(BX+PAD+262, BY+7, 1, BH-14);
