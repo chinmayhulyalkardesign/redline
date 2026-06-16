@@ -78,6 +78,8 @@ const TRAFFIC_DEFS = [
   { key:'t_station',   file:'station',    scale:3.2 },
 ];
 TRAFFIC_DEFS.forEach(d => loadImg(d.key, `assets/vehicles/${d.file}.png`));
+// Civilian traffic only — police cars come from the chase system, not random spawns
+const CIVILIAN_DEFS = TRAFFIC_DEFS.filter(d => d.key !== 't_police');
 // Building tiles
 loadImg('bld_brick0',  'assets/tiles/brick_red_0.png');
 loadImg('bld_brick1',  'assets/tiles/brick_red_1.png');
@@ -119,6 +121,9 @@ const sfxPU      = () => [440,554,659,880].forEach((f,i)=>tone(f,'sine',0.11,0.1
 const sfxLife    = () => { tone(330,'sine',0.08,0.14); tone(440,'sine',0.10,0.14,null,0.10); tone(554,'sine',0.12,0.14,null,0.20); tone(880,'sine',0.16,0.20,null,0.30); };
 const sfxShield  = () => { tone(80,'sine',0.18,0.16,40); noise(0.14,180,50,0.13); };
 const sfxNitro   = () => { noise(0.12,400,800,0.15); tone(220,'sawtooth',0.2,0.08,440); };
+const sfxSiren   = () => { tone(760,'sawtooth',0.20,0.045,520); tone(560,'sawtooth',0.20,0.045,760,0.20); };
+const sfxMissile = () => { noise(0.12,300,1400,0.10); tone(900,'sawtooth',0.20,0.07,160); };
+const sfxExplode = () => { noise(0.42,800,40,0.20); tone(70,'sawtooth',0.4,0.12,30); };
 
 // ═══ SYNTHWAVE MUSIC ENGINE ═══════════════════════════════════════
 let _mPlaying=false, _mStep=0, _mNextT=0, _mTimerID=null, _mMaster=null, _mDly=null;
@@ -378,6 +383,12 @@ const MIN_CAR_GAP    = 200;   // world-px min gap between cars in same lane
 const CAR_DECEL      = 120;   // px/s² deceleration when closing on car ahead
 const CAR_ACCEL      = 70;    // px/s² re-acceleration when clear
 
+// ═══ POLICE CHASE CONSTANTS ══════════════════════════════════════
+const HEAT_PER_STAR  = 20;    // heat points per wanted star (0-4 = 0-80)
+const MAX_COPS       = 3;     // max cops chasing at once
+const MISSILE_REL    = 640;   // missile screen-speed above camera (px/s)
+const COP_BLAST_COOL = 20;    // heat removed when a cop is destroyed (= 1 star)
+
 // ═══ SKY / TIME-OF-DAY ═══════════════════════════════════════════
 // phase 0=day  0.5=dusk  1=night  (driven by G.camera distance)
 function getSkyPhase(){ return 1; } // NFS Underground — always midnight
@@ -390,7 +401,7 @@ const PU_DEFS = {
   nitro:  { icon:'🔥',  label:'NITRO',   col:'#ffcc00', dur:5 },
   magnet: { icon:'🧲',  label:'MAGNET',  col:'#ff44cc', dur:7 },
   ghost:  { icon:'👻',  label:'GHOST',   col:'#aaffcc', dur:5 },
-  emp:    { icon:'⚡',  label:'EMP',     col:'#88ffff', dur:3 },
+  emp:    { icon:'🚀',  label:'EMP',     col:'#00eeff', dur:0 },
   medkit: { icon:'❤️',  label:'MEDKIT',  col:'#ff2244', dur:0 },
 };
 const PU_KEYS = ['shield','nitro','magnet','ghost','emp'];
@@ -427,7 +438,14 @@ function newGame(){
     weather:'clear', weatherTimer:25+Math.random()*20,
     rainDrops:[],
     narrowing:false, narrowTimer:35+Math.random()*20,
-    emp:false, empTimer:0,
+
+    // ── Police chase ──
+    heat:0, heatBonus:0, wanted:0, wantedFlash:0,
+    copSpawnT:0, sirenT:0,
+    roadblocks:[], roadblockT:13,
+
+    // ── EMP missiles ──
+    missiles:0, missilesFired:[],
 
     bldNear: genBldLayer(320, 0),
     bldFar:  genBldLayer(200, 53),
@@ -437,7 +455,7 @@ function newGame(){
 
 // ═══ INPUT ═══════════════════════════════════════════════════════
 window.addEventListener('keydown', e => {
-  if(['Space','ArrowUp','ArrowDown','KeyW','KeyS'].includes(e.code)) e.preventDefault();
+  if(['Space','ArrowUp','ArrowDown','KeyW','KeyS','KeyF'].includes(e.code)) e.preventDefault();
   if(e.code==='Escape' && G?.state==='playing'){ G.paused=!G.paused; return; }
   if(e.code==='Space' && G?.state!=='playing'){ handleStart(); return; }
   if(G?.state==='playing' && !G.paused){
@@ -445,6 +463,7 @@ window.addEventListener('keydown', e => {
     if((e.code==='ArrowUp'||e.code==='KeyW')   && p.lane>0)        { p.lane--; sfxHonk(); }
     if((e.code==='ArrowDown'||e.code==='KeyS') && p.lane<LANES-1)  { p.lane++; sfxHonk(); }
     if(e.code==='Space') deployGhost();
+    if(e.code==='KeyF')  fireMissile();
   }
 });
 canvas.addEventListener('pointerdown', e => {
@@ -524,8 +543,48 @@ function update(ts){
   // ── Screen shake decay ────────────────────────────────────────
   G.shake=Math.max(0,G.shake-dt*28);
 
-  // ── EMP timer ────────────────────────────────────────────────
-  if(G.emp){ G.empTimer-=dt; if(G.empTimer<=0) G.emp=false; }
+  // ── Police chase: heat & wanted level ─────────────────────────
+  const baseHeat = Math.min(80, G.elapsed*0.5);   // inevitable escalation over time
+  if(G.heatBonus>0)      G.heatBonus = Math.max(0, G.heatBonus - dt*2.5);
+  else if(G.heatBonus<0) G.heatBonus = Math.min(0, G.heatBonus + dt*2.5);
+  G.heat = Math.max(0, Math.min(100, baseHeat + G.heatBonus));
+  const newWanted = Math.min(4, Math.floor(G.heat/HEAT_PER_STAR));
+  if(newWanted > G.wanted){
+    G.wantedFlash = 1; sfxSiren();
+    G.toasts.push({msg:`🚨 WANTED ${'★'.repeat(newWanted)}`, timer:2.0});
+  }
+  G.wanted = newWanted;
+  if(G.wantedFlash>0) G.wantedFlash = Math.max(0, G.wantedFlash - dt*1.5);
+  // Siren loop while wanted
+  if(G.wanted>=1){ G.sirenT-=dt; if(G.sirenT<=0){ sfxSiren(); G.sirenT=1.1; } }
+
+  // Maintain cop count = min(wanted, MAX_COPS)
+  const activeCops = G.cars.filter(c=>c.cop && !c.retreat);
+  const desiredCops = Math.min(G.wanted, MAX_COPS);
+  if(activeCops.length > desiredCops){
+    activeCops.sort((a,b)=>a.worldX-b.worldX); // rearmost first
+    for(let i=0;i<activeCops.length-desiredCops;i++) activeCops[i].retreat=true;
+  } else if(activeCops.length < desiredCops){
+    G.copSpawnT -= dt;
+    if(G.copSpawnT<=0){
+      const lane=Math.floor(Math.random()*LANES);
+      G.cars.push({ key:'t_police', scale:3.2, cop:true, lane, y:laneCenter(lane),
+                    worldX:G.camera-60, fwdSpd:G.speed*1.16, origSpd:G.speed*1.16,
+                    laneStepT:1.0, ramT:1.0, retreat:false });
+      G.copSpawnT = 2.5+Math.random()*2;
+      G.toasts.push({msg:'🚓 Cop on your tail!', timer:1.8});
+    }
+  }
+
+  // Roadblock spawning (wanted ≥ 3)
+  if(G.wanted>=3){
+    G.roadblockT -= dt;
+    if(G.roadblockT<=0){
+      const gapLane=Math.floor(Math.random()*LANES);
+      G.roadblocks.push({ worldX:G.camera+W+160, gapLane, passed:false, cleared:false, warned:false });
+      G.roadblockT = 13+Math.random()*7;
+    }
+  }
 
   // ── Weather cycle ─────────────────────────────────────────────
   G.weatherTimer-=dt;
@@ -566,6 +625,7 @@ function update(ts){
 
   // ── Traffic cars (same direction, slower) ─────────────────────
   for(const c of G.cars){
+    if(c.cop) continue;   // cops handled by pursuit AI
     c.y = (c.y ?? laneCenter(c.lane));
 
     // Erratic: brake-check cooldown + drift
@@ -590,7 +650,8 @@ function update(ts){
 
   // Speed regulation: slow down if closing on car ahead in same lane
   for(const c of G.cars){
-    if(c.braking) { if(!G.emp) c.worldX += c.fwdSpd*dt; continue; } // erratic braker skips normal regulation
+    if(c.cop) continue;   // cops handled by pursuit AI
+    if(c.braking) { c.worldX += c.fwdSpd*dt; continue; } // erratic braker skips normal regulation
     const cSX = c.worldX - G.camera;
     const cImg = IMG[c.key]; if(!cImg) continue;
     const cDW = cImg.naturalWidth * c.scale;
@@ -608,8 +669,101 @@ function update(ts){
     } else {
       c.fwdSpd = Math.min(c.origSpd, c.fwdSpd + CAR_ACCEL*dt);
     }
-    if(!G.emp) c.worldX += c.fwdSpd*dt;
+    c.worldX += c.fwdSpd*dt;
   }
+
+  // ── Cop pursuit AI ────────────────────────────────────────────
+  for(const c of G.cars){
+    if(!c.cop) continue;
+    const csx = c.worldX - G.camera;
+    if(c.retreat){
+      c.fwdSpd += (G.speed*0.82 - c.fwdSpd)*Math.min(1,dt*2);
+      c.worldX += c.fwdSpd*dt;
+    } else {
+      // Lane-match the player one step at a time
+      c.laneStepT -= dt;
+      if(c.laneStepT<=0){
+        if(c.lane<p.lane) c.lane++;
+        else if(c.lane>p.lane) c.lane--;
+        c.laneStepT = 0.85+Math.random()*0.5;
+      }
+      // Chase speed: close the gap from behind, then sit just behind
+      let target = (csx < PLAYER_X-4) ? G.speed*1.16 : G.speed*0.99;
+      // Ram lunge when aligned and close behind
+      if(c.lane===p.lane && csx<PLAYER_X-PW*0.3 && csx>PLAYER_X-170){
+        c.ramT -= dt;
+        if(c.ramT<=0) target = G.speed*1.40;
+      } else { c.ramT = 0.7+Math.random()*0.6; }
+      c.fwdSpd += (target - c.fwdSpd)*Math.min(1,dt*3);
+      c.worldX += c.fwdSpd*dt;
+    }
+    c.y += (laneCenter(c.lane)-c.y)*Math.min(1,dt*7);
+  }
+
+  // ── EMP missiles in flight ────────────────────────────────────
+  for(const m of G.missilesFired){
+    if(m.dead) continue;
+    m.worldX += (G.speed + MISSILE_REL)*dt;
+    const msx = m.worldX - G.camera;
+    if(msx > W+40){ m.dead=true; continue; }
+    // Find target: prefer a cop, fall back to civilian traffic
+    let hit=null, hitCop=false;
+    for(const c of G.cars){
+      const img=IMG[c.key]; if(!img) continue;
+      const cdw=img.naturalWidth*c.scale;
+      const cy=c.y??laneCenter(c.lane);
+      const csx=c.worldX-G.camera;
+      if(Math.abs(cy-m.y)<LANE_H*0.55 && Math.abs(csx-msx)<(cdw/2+12)){
+        if(c.cop){ hit=c; hitCop=true; break; }
+        if(!hit) hit=c;
+      }
+    }
+    if(hit){
+      const cy=hit.y??laneCenter(hit.lane);
+      blastCar(hit, hit.worldX-G.camera, cy);
+      G.cars.splice(G.cars.indexOf(hit),1);
+      sfxExplode(); G.shake=Math.max(G.shake,4); m.dead=true;
+      if(hitCop){
+        G.heatBonus -= COP_BLAST_COOL;
+        G.bonusPoints += 300;
+        G.toasts.push({msg:'🚓💥 COP DOWN!  −1★  +300', timer:2.2});
+      } else {
+        G.bonusPoints += 150;
+        G.toasts.push({msg:'💥 +150', timer:1.2});
+      }
+      continue;
+    }
+    // Else check roadblocks — a blocked lane can be breached
+    for(const rb of G.roadblocks){
+      if(rb.cleared) continue;
+      const rbsx=rb.worldX-G.camera;
+      if(Math.abs(rbsx-msx)<26 && m.lane!==rb.gapLane){
+        rb.cleared=true; m.dead=true;
+        spawnParts(rbsx,laneCenter(m.lane),16,'#ffaa00');
+        spawnParts(rbsx,laneCenter(m.lane),10,'#ffffff');
+        sfxExplode(); G.shake=Math.max(G.shake,3);
+        G.bonusPoints += 200;
+        G.toasts.push({msg:'💥 Roadblock breached! +200', timer:2});
+        break;
+      }
+    }
+  }
+  G.missilesFired = G.missilesFired.filter(m=>!m.dead);
+
+  // ── Roadblock approach & collision ────────────────────────────
+  for(const rb of G.roadblocks){
+    const rbsx = rb.worldX - G.camera;
+    if(!rb.warned && rbsx<W && rbsx>W-220){
+      rb.warned=true; G.toasts.push({msg:'⚠️ ROADBLOCK AHEAD!', timer:2});
+    }
+    if(!rb.passed && Math.abs(rbsx-PLAYER_X)<26){
+      rb.passed=true;
+      if(!rb.cleared && p.lane!==rb.gapLane && p.invuln<=0 && !G.ghost){
+        hitPlayer(); G.shake=Math.max(G.shake,5);
+      }
+    }
+  }
+  G.roadblocks = G.roadblocks.filter(rb=>(rb.worldX-G.camera) > -120);
 
   G.cars = G.cars.filter(c => {
     const img=IMG[c.key]; if(!img) return true;
@@ -627,7 +781,7 @@ function update(ts){
       if(!blocked) freeLanes.push(l);
     }
     if(freeLanes.length > 0){
-      const def  = TRAFFIC_DEFS[Math.floor(Math.random()*TRAFFIC_DEFS.length)];
+      const def  = CIVILIAN_DEFS[Math.floor(Math.random()*CIVILIAN_DEFS.length)];
       const lane = freeLanes[Math.floor(Math.random()*freeLanes.length)];
       const fwdSpd = G.speed*(G.waveDense ? 0.52+Math.random()*0.22 : 0.48+Math.random()*0.32);
       const erratic = Math.random() < (G.waveDense ? 0.12 : 0.20); // fewer erratic drivers in dense waves
@@ -786,6 +940,7 @@ function hitPlayer(){
   const p=G.player;
   if(G.shield){ G.shield=false; G.pu=null; sfxShield(); spawnParts(PLAYER_X,p.y,14,'#4488ff'); G.toasts.push({msg:'🛡️ Shield absorbed the hit!',timer:2}); return; }
   p.lives--;
+  G.heatBonus += 8;   // a crash draws police attention
   sfxCrash(); G.flash=1;
   spawnParts(PLAYER_X,p.y,14,'#ff4400'); spawnParts(PLAYER_X,p.y,8,'#ffcc00');
   if(p.lives<=0){ G.toasts=[]; p.dead=true; p.deadT=0; if(G.score>G.best)G.best=G.score; }
@@ -794,10 +949,17 @@ function hitPlayer(){
 
 function busted(){
   if(G.score>G.best) G.best=G.score;
-  G.chase=false; G.chaseCop=null;
   G.toasts=[];
   G.state='busted';
   sfxCrash(); G.flash=1;
+}
+
+function fireMissile(){
+  if(G.missiles<=0) return;
+  const p=G.player;
+  G.missiles--;
+  G.missilesFired.push({ worldX:G.camera+PLAYER_X+PW/2+4, y:p.y, lane:p.lane, dead:false });
+  sfxMissile();
 }
 
 function activatePU(type){
@@ -815,10 +977,9 @@ function activatePU(type){
     return;
   }
   if(type==='emp'){
-    G.emp=true; G.empTimer=PU_DEFS.emp.dur;
+    G.missiles = Math.min(3, G.missiles+1);
     sfxPU();
-    spawnParts(W/2,H/2,20,'#88ffff');
-    G.toasts.push({msg:'⚡ EMP! Traffic frozen!',timer:2.2});
+    G.toasts.push({msg:'🚀 EMP Missile! Press F to fire',timer:2.4});
     return;
   }
   if(type==='ghost'){
@@ -859,11 +1020,21 @@ function draw(){
   drawRain();
   drawCoins();
   drawPUItems();
+  drawRoadblocks();
   drawTraffic();
   drawPlayer();
+  drawMissiles();
   drawParticles();
   drawSpeedLines();
   if(shook) ctx.restore();
+
+  // ── Wanted-level red/blue strobe vignette ─────────────────────
+  if(G.wanted>=2){
+    const wv=Math.max(0,(G.wanted>=3?0.10:0.05)+0.04*Math.sin(Date.now()/180));
+    const strobe=Math.sin(Date.now()/120)>0;
+    ctx.fillStyle = strobe ? `rgba(255,30,50,${wv.toFixed(2)})` : `rgba(40,80,255,${wv.toFixed(2)})`;
+    ctx.fillRect(0,0,W,H);
+  }
 
   // ── Nitro purple vignette ──────────────────────────────────────
   if(G.pu==='nitro'){
@@ -1200,13 +1371,19 @@ function drawTraffic(){
     // Car sprite
     ctx.drawImage(img,0,0,img.naturalWidth,img.naturalHeight,sx,sy,dw,dh);
 
-    // EMP freeze glow
-    if(G.emp){
-      const glitch=Math.sin(Date.now()/40)*0.4+0.6;
-      ctx.save(); ctx.globalAlpha=glitch*0.55;
-      ctx.strokeStyle='#88ffff'; ctx.lineWidth=2;
-      ctx.shadowColor='#88ffff'; ctx.shadowBlur=12;
-      ctx.strokeRect(Math.round(sx-dw/2),Math.round(cy-dh/2),dw,dh);
+    // Cop siren strobe (red/blue light bar + glow)
+    if(c.cop){
+      const strobe=Math.sin(Date.now()/80)>0;
+      const lx=sx+dw*0.5;
+      ctx.save();
+      ctx.fillStyle = strobe ? '#ff2233' : '#2244ff';
+      ctx.fillRect(sx+dw*0.30, sy-3, dw*0.16, 4);
+      ctx.fillStyle = strobe ? '#2244ff' : '#ff2233';
+      ctx.fillRect(sx+dw*0.54, sy-3, dw*0.16, 4);
+      const gcol = strobe ? 'rgba(255,40,60,0.55)' : 'rgba(40,90,255,0.55)';
+      const gg=ctx.createRadialGradient(lx,sy,2,lx,sy,42);
+      gg.addColorStop(0,gcol); gg.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=gg; ctx.fillRect(lx-42,sy-32,84,52);
       ctx.restore();
     }
 
@@ -1216,6 +1393,58 @@ function drawTraffic(){
       ctx.shadowBlur=10; ctx.shadowColor='#ff2200';
       ctx.fillStyle='rgba(255,40,0,0.85)';
       ctx.fillRect(sx,cy-dh/2+2,6,dh-4);
+      ctx.restore();
+    }
+  }
+}
+
+// ── EMP missiles ──────────────────────────────────────────────
+function drawMissiles(){
+  for(const m of G.missilesFired){
+    const sx=m.worldX-G.camera;
+    if(sx<-20||sx>W+20) continue;
+    // Glowing cyan trail
+    for(let i=1;i<=6;i++){
+      ctx.save(); ctx.globalAlpha=0.5/i;
+      ctx.fillStyle='#00eeff';
+      ctx.beginPath(); ctx.ellipse(sx-i*9,m.y,Math.max(1,6-i*0.7),3,0,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+    // Body
+    ctx.save();
+    ctx.shadowColor='#00eeff'; ctx.shadowBlur=14;
+    ctx.fillStyle='#ccfbff';
+    ctx.beginPath(); ctx.ellipse(sx,m.y,11,4,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#00eeff';
+    ctx.beginPath(); ctx.ellipse(sx+3,m.y,6,3,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── Police roadblocks ─────────────────────────────────────────
+function drawRoadblocks(){
+  for(const rb of G.roadblocks){
+    const sx=rb.worldX-G.camera;
+    if(sx<-60||sx>W+60) continue;
+    for(let l=0;l<LANES;l++){
+      if(l===rb.gapLane || rb.cleared) continue;
+      const cy=laneCenter(l), bw=26, bh=LANE_H-12;
+      ctx.save(); ctx.translate(sx,cy);
+      // Striped barricade
+      ctx.fillStyle='#222'; ctx.fillRect(-bw/2,-bh/2,bw,bh);
+      const stripes=Math.ceil(bh/10);
+      for(let s=0;s<stripes;s++){
+        ctx.fillStyle = s%2===0 ? '#ff5522' : '#f4f4f4';
+        ctx.fillRect(-bw/2,-bh/2+s*10,bw,Math.min(10,bh/2 - s*10 + bh/2));
+      }
+      // Flashing light on top
+      const strobe=Math.sin(Date.now()/90)>0;
+      ctx.fillStyle = strobe ? '#ff2233':'#2244ff';
+      ctx.beginPath(); ctx.arc(0,-bh/2-5,4,0,Math.PI*2); ctx.fill();
+      const gg=ctx.createRadialGradient(0,-bh/2-5,1,0,-bh/2-5,22);
+      gg.addColorStop(0, strobe?'rgba(255,40,60,0.6)':'rgba(40,90,255,0.6)');
+      gg.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=gg; ctx.fillRect(-22,-bh/2-27,44,30);
       ctx.restore();
     }
   }
@@ -1439,6 +1668,24 @@ function drawHUD(){
   // divider
   ctx.fillStyle='rgba(255,255,255,0.14)'; ctx.fillRect(BX+PAD+394, BY+7, 1, BH-14);
 
+  // ── WANTED ──
+  ctx.font="bold 12px 'Kenney Rocket', monospace"; ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillStyle='rgba(255,255,255,0.40)'; ctx.fillText('WANTED', BX+PAD+406, CY);
+  for(let i=0;i<4;i++){
+    const on=i<G.wanted;
+    ctx.font='14px serif'; ctx.textAlign='center';
+    if(on){
+      const pulse = G.wanted>=3 ? 0.6+0.4*Math.sin(Date.now()/150) : 1;
+      ctx.save(); ctx.globalAlpha=pulse;
+      ctx.fillStyle = G.wanted>=3 ? '#ff3322' : '#ffcc00';
+      ctx.fillText('★', BX+PAD+474+i*18, CY+1);
+      ctx.restore();
+    } else {
+      ctx.fillStyle='rgba(255,255,255,0.14)';
+      ctx.fillText('★', BX+PAD+474+i*18, CY+1);
+    }
+  }
+
   // ── SPEED ──
   const spdN=Math.floor(G.speed);
   const spdPct=Math.max(0,Math.min(1,G.speed/450));
@@ -1481,6 +1728,17 @@ function drawHUD(){
     ctx.textAlign='left'; ctx.textBaseline='top';
     ctx.fillStyle='#aaffcc';
     ctx.fillText('〉〉 DRAFTING',BX+14,BY+BH+6);
+    ctx.restore();
+  }
+
+  // ── Missile ammo indicator (bottom-left) ──
+  if(G.state==='playing' && G.missiles>0){
+    const pulse=0.7+0.3*Math.sin(Date.now()/300);
+    ctx.save(); ctx.globalAlpha=pulse;
+    ctx.font="bold 12px 'Kenney Rocket', monospace";
+    ctx.textAlign='left'; ctx.textBaseline='bottom';
+    ctx.fillStyle='#00eeff';
+    ctx.fillText(`🚀 ×${G.missiles}   F to fire`, 14, H-6);
     ctx.restore();
   }
 
