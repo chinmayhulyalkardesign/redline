@@ -567,12 +567,16 @@ function update(ts){
   } else if(activeCops.length < desiredCops){
     G.copSpawnT -= dt;
     if(G.copSpawnT<=0){
-      const lane=Math.floor(Math.random()*LANES);
+      // Spawn well behind & off-screen in a lane other than the player's,
+      // so the cop visibly approaches rather than appearing on top of the player
+      let lane=Math.floor(Math.random()*LANES);
+      if(lane===G.player.lane) lane=(lane+1)%LANES;
       G.cars.push({ key:'t_police', scale:3.2, cop:true, lane, y:laneCenter(lane),
-                    worldX:G.camera-60, fwdSpd:G.speed*1.16, origSpd:G.speed*1.16,
-                    laneStepT:1.0, ramT:1.0, retreat:false });
-      G.copSpawnT = 2.5+Math.random()*2;
-      G.toasts.push({msg:'🚓 Cop on your tail!', timer:1.8});
+                    worldX:G.camera-(200+Math.random()*60), fwdSpd:G.speed*1.16, origSpd:G.speed,
+                    laneStepT:0.8, ramT:2.5+Math.random()*1.5, ramWindup:0, lunging:0,
+                    grace:1.4, retreat:false });
+      G.copSpawnT = 3.0+Math.random()*2;
+      if(activeCops.length===0) G.toasts.push({msg:'🚓 Police pursuit!', timer:1.8});
     }
   }
 
@@ -673,11 +677,15 @@ function update(ts){
   }
 
   // ── Cop pursuit AI ────────────────────────────────────────────
+  // Cops catch up to a tailing distance behind the player, hold station,
+  // then telegraph a ram (brief windup → lunge) the player can dodge.
+  const TAIL_X = PLAYER_X - 150;   // hold ~150px behind the player
   for(const c of G.cars){
     if(!c.cop) continue;
+    if(c.grace>0) c.grace-=dt;
     const csx = c.worldX - G.camera;
     if(c.retreat){
-      c.fwdSpd += (G.speed*0.82 - c.fwdSpd)*Math.min(1,dt*2);
+      c.fwdSpd += (G.speed*0.80 - c.fwdSpd)*Math.min(1,dt*2);
       c.worldX += c.fwdSpd*dt;
     } else {
       // Lane-match the player one step at a time
@@ -685,15 +693,33 @@ function update(ts){
       if(c.laneStepT<=0){
         if(c.lane<p.lane) c.lane++;
         else if(c.lane>p.lane) c.lane--;
-        c.laneStepT = 0.85+Math.random()*0.5;
+        c.laneStepT = 0.8+Math.random()*0.4;
       }
-      // Chase speed: close the gap from behind, then sit just behind
-      let target = (csx < PLAYER_X-4) ? G.speed*1.16 : G.speed*0.99;
-      // Ram lunge when aligned and close behind
-      if(c.lane===p.lane && csx<PLAYER_X-PW*0.3 && csx>PLAYER_X-170){
-        c.ramT -= dt;
-        if(c.ramT<=0) target = G.speed*1.40;
-      } else { c.ramT = 0.7+Math.random()*0.6; }
+      let target;
+      if(c.lunging>0){
+        c.lunging -= dt;
+        target = G.speed*1.55;                 // committed ram
+      } else if(c.ramWindup>0){
+        c.ramWindup -= dt;
+        target = G.speed*0.92;                  // brief telegraph (rev back)
+        if(c.ramWindup<=0 && c.lane===p.lane) c.lunging=0.7;
+      } else if(csx < TAIL_X-8){
+        target = G.speed*1.16;                  // catch up to tail position
+      } else if(csx > PLAYER_X-40){
+        target = G.speed*0.86;                  // overshot the player — drop back
+      } else {
+        target = G.speed*1.0;                   // hold station behind
+        // Begin a ram attempt only once settled in the player's lane & on screen.
+        // Stagger rams so only one cop lunges at a time (multi-cop chases stay dodgeable).
+        if(c.lane===p.lane && csx>TAIL_X-40 && c.grace<=0){
+          c.ramT -= dt;
+          if(c.ramT<=0){
+            const someoneRamming = G.cars.some(o=>o.cop && o!==c && ((o.ramWindup||0)>0 || (o.lunging||0)>0));
+            if(!someoneRamming){ c.ramWindup=0.6; c.ramT=3.0+Math.random()*2; sfxSiren(); }
+            else c.ramT=0.5;
+          }
+        }
+      }
       c.fwdSpd += (target - c.fwdSpd)*Math.min(1,dt*3);
       c.worldX += c.fwdSpd*dt;
     }
@@ -768,7 +794,9 @@ function update(ts){
   G.cars = G.cars.filter(c => {
     const img=IMG[c.key]; if(!img) return true;
     const dw=Math.round(img.naturalWidth*c.scale);
-    return (c.worldX-G.camera)+dw/2 > -80;
+    // cops spawn/retreat further back, so cull them later than civilian traffic
+    const cull = c.cop ? -300 : -80;
+    return (c.worldX-G.camera)+dw/2 > cull;
   });
 
   // ── Spawn (wave-aware, gap-checked) ──────────────────────────
@@ -875,6 +903,7 @@ function update(ts){
       const sx=c.worldX-G.camera;
       const cy=c.y ?? laneCenter(c.lane);
       if(Math.abs(sx-PLAYER_X)<(dw/2+PW/2)-18 && Math.abs(cy-p.y)<(dh/2+PH/2)-8){
+        if(c.cop && c.grace>0) continue;   // arriving cop can't bust yet
         // Blast the hit car — explode and remove it
         blastCar(c, sx, cy);
         G.cars.splice(i, 1);
@@ -1384,6 +1413,13 @@ function drawTraffic(){
       const gg=ctx.createRadialGradient(lx,sy,2,lx,sy,42);
       gg.addColorStop(0,gcol); gg.addColorStop(1,'rgba(0,0,0,0)');
       ctx.fillStyle=gg; ctx.fillRect(lx-42,sy-32,84,52);
+      // Ram telegraph — bright headlight flare ahead while winding up / lunging
+      if(c.ramWindup>0 || c.lunging>0){
+        const flare=ctx.createRadialGradient(sx+dw,cy,2,sx+dw,cy,64);
+        flare.addColorStop(0,'rgba(255,255,255,0.55)');
+        flare.addColorStop(1,'rgba(255,255,255,0)');
+        ctx.fillStyle=flare; ctx.fillRect(sx+dw-24,cy-34,90,68);
+      }
       ctx.restore();
     }
 
