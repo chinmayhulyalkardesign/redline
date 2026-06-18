@@ -544,9 +544,9 @@ function update(ts){
   G.shake=Math.max(0,G.shake-dt*28);
 
   // ── Police chase: heat & wanted level ─────────────────────────
-  const baseHeat = Math.min(80, G.elapsed*0.5);   // inevitable escalation over time
+  const baseHeat = Math.min(85, G.elapsed*0.7);   // inevitable escalation over time
   if(G.heatBonus>0)      G.heatBonus = Math.max(0, G.heatBonus - dt*2.5);
-  else if(G.heatBonus<0) G.heatBonus = Math.min(0, G.heatBonus + dt*2.5);
+  else if(G.heatBonus<0) G.heatBonus = Math.min(0, G.heatBonus + dt*1.6);  // blast relief fades back slowly → chase resumes
   G.heat = Math.max(0, Math.min(100, baseHeat + G.heatBonus));
   const newWanted = Math.min(4, Math.floor(G.heat/HEAT_PER_STAR));
   if(newWanted > G.wanted){
@@ -698,7 +698,7 @@ function update(ts){
       let target;
       if(c.lunging>0){
         c.lunging -= dt;
-        target = G.speed*1.55;                 // committed ram
+        target = G.speed*1.40;                  // committed ram
       } else if(c.ramWindup>0){
         c.ramWindup -= dt;
         target = G.speed*0.92;                  // brief telegraph (rev back)
@@ -722,16 +722,27 @@ function update(ts){
       }
       c.fwdSpd += (target - c.fwdSpd)*Math.min(1,dt*3);
       c.worldX += c.fwdSpd*dt;
+
+      // Never slide over/past the player. A bust only happens on contact in
+      // the player's lane while bustable (handled in the collision pass);
+      // in every other case (dodged, invuln, ghost, spawn-grace) hold the cop
+      // clearly behind so it can't visually cover the player.
+      const canBust = (c.lane===p.lane && c.grace<=0 && p.invuln<=0 && !G.ghost);
+      const limit = canBust ? (PLAYER_X-32) : (PLAYER_X-108);
+      if((c.worldX-G.camera) > limit){
+        c.worldX = G.camera + limit;
+        if(!canBust){ c.lunging=0; c.ramWindup=0; }  // ram fizzled — reset & retry later
+      }
     }
     c.y += (laneCenter(c.lane)-c.y)*Math.min(1,dt*7);
   }
 
-  // ── EMP missiles in flight ────────────────────────────────────
+  // ── EMP missiles in flight (fire REARWARD at pursuing cops) ───
   for(const m of G.missilesFired){
     if(m.dead) continue;
-    m.worldX += (G.speed + MISSILE_REL)*dt;
+    m.worldX += (G.speed - MISSILE_REL)*dt;   // travels left/back toward cops
     const msx = m.worldX - G.camera;
-    if(msx > W+40){ m.dead=true; continue; }
+    if(msx < -260){ m.dead=true; continue; }   // long rearward reach into the chase zone
     // Find target: prefer a cop, fall back to civilian traffic
     let hit=null, hitCop=false;
     for(const c of G.cars){
@@ -987,7 +998,7 @@ function fireMissile(){
   if(G.missiles<=0) return;
   const p=G.player;
   G.missiles--;
-  G.missilesFired.push({ worldX:G.camera+PLAYER_X+PW/2+4, y:p.y, lane:p.lane, dead:false });
+  G.missilesFired.push({ worldX:G.camera+PLAYER_X-PW/2-4, y:p.y, lane:p.lane, dead:false });
   sfxMissile();
 }
 
@@ -1439,11 +1450,11 @@ function drawMissiles(){
   for(const m of G.missilesFired){
     const sx=m.worldX-G.camera;
     if(sx<-20||sx>W+20) continue;
-    // Glowing cyan trail
+    // Glowing cyan trail (missile flies left, so trail streaks right)
     for(let i=1;i<=6;i++){
       ctx.save(); ctx.globalAlpha=0.5/i;
       ctx.fillStyle='#00eeff';
-      ctx.beginPath(); ctx.ellipse(sx-i*9,m.y,Math.max(1,6-i*0.7),3,0,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(sx+i*9,m.y,Math.max(1,6-i*0.7),3,0,0,Math.PI*2); ctx.fill();
       ctx.restore();
     }
     // Body
@@ -1452,7 +1463,7 @@ function drawMissiles(){
     ctx.fillStyle='#ccfbff';
     ctx.beginPath(); ctx.ellipse(sx,m.y,11,4,0,0,Math.PI*2); ctx.fill();
     ctx.fillStyle='#00eeff';
-    ctx.beginPath(); ctx.ellipse(sx+3,m.y,6,3,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(sx-3,m.y,6,3,0,0,Math.PI*2); ctx.fill();
     ctx.restore();
   }
 }
