@@ -39,7 +39,7 @@ const _krf = new FontFace('Kenney Rocket', "url('assets/fonts/KenneyRocket.ttf')
 _krf.load().then(f => document.fonts.add(f));
 
 // ═══ LAYOUT ══════════════════════════════════════════════════════
-const PLAYER_X = 160;      // player car fixed screen-X centre
+const PLAYER_X = 230;      // player car fixed screen-X centre (sits forward, leaving road behind for the chase)
 const ROAD_Y   = 188;      // top of road
 const ROAD_H   = 228;      // road height  (3 × 76 px lanes)
 const LANES    = 3;
@@ -679,7 +679,8 @@ function update(ts){
   // ── Cop pursuit AI ────────────────────────────────────────────
   // Cops catch up to a tailing distance behind the player, hold station,
   // then telegraph a ram (brief windup → lunge) the player can dodge.
-  const TAIL_X = PLAYER_X - 150;   // hold ~150px behind the player
+  const TAIL_X = PLAYER_X - 165;   // hold the cop this far behind — a clear, visible gap
+  const COP_HALF = 53;             // police sprite half-width (33×3.2/2)
   for(const c of G.cars){
     if(!c.cop) continue;
     if(c.grace>0) c.grace-=dt;
@@ -688,11 +689,16 @@ function update(ts){
       c.fwdSpd += (G.speed*0.80 - c.fwdSpd)*Math.min(1,dt*2);
       c.worldX += c.fwdSpd*dt;
     } else {
-      // Lane-match the player one step at a time
+      // Lane-match the player one step at a time — but a cop can't merge into a
+      // lane that already has a car next to it (no ghosting through traffic).
       c.laneStepT -= dt;
       if(c.laneStepT<=0){
-        if(c.lane<p.lane) c.lane++;
-        else if(c.lane>p.lane) c.lane--;
+        const dir = c.lane<p.lane ? 1 : (c.lane>p.lane ? -1 : 0);
+        if(dir!==0){
+          const want = c.lane+dir;
+          const blocked = G.cars.some(o=>o!==c && o.lane===want && Math.abs(o.worldX-c.worldX)<130);
+          if(!blocked) c.lane=want;
+        }
         c.laneStepT = 0.8+Math.random()*0.4;
       }
       let target;
@@ -705,10 +711,10 @@ function update(ts){
         if(c.ramWindup<=0 && c.lane===p.lane) c.lunging=0.7;
       } else if(csx < TAIL_X-8){
         target = G.speed*1.16;                  // catch up to tail position
-      } else if(csx > PLAYER_X-40){
-        target = G.speed*0.86;                  // overshot the player — drop back
       } else {
-        target = G.speed*1.0;                   // hold station behind
+        // Hold station at the tail distance (proportional → settles into a clear gap)
+        const err = csx - TAIL_X;               // >0 = too close to player
+        target = G.speed*(1 - Math.max(-0.12, Math.min(0.14, err/300)));
         // Begin a ram attempt only once settled in the player's lane & on screen.
         // Stagger rams so only one cop lunges at a time (multi-cop chases stay dodgeable).
         if(c.lane===p.lane && csx>TAIL_X-40 && c.grace<=0){
@@ -723,12 +729,23 @@ function update(ts){
       c.fwdSpd += (target - c.fwdSpd)*Math.min(1,dt*3);
       c.worldX += c.fwdSpd*dt;
 
+      // Don't phase through civilian traffic ahead in the same lane — hold behind it.
+      for(const o of G.cars){
+        if(o===c || o.cop || o.lane!==c.lane) continue;
+        const oimg=IMG[o.key]; if(!oimg) continue;
+        const oHalf = oimg.naturalWidth*o.scale/2;
+        if(o.worldX>c.worldX && (o.worldX-c.worldX)<240){
+          const behind = o.worldX - oHalf - COP_HALF - 4;
+          if(c.worldX > behind){ c.worldX = behind; c.lunging=0; }
+        }
+      }
+
       // Never slide over/past the player. A bust only happens on contact in
       // the player's lane while bustable (handled in the collision pass);
       // in every other case (dodged, invuln, ghost, spawn-grace) hold the cop
       // clearly behind so it can't visually cover the player.
       const canBust = (c.lane===p.lane && c.grace<=0 && p.invuln<=0 && !G.ghost);
-      const limit = canBust ? (PLAYER_X-32) : (PLAYER_X-108);
+      const limit = canBust ? (PLAYER_X-36) : (PLAYER_X-118);
       if((c.worldX-G.camera) > limit){
         c.worldX = G.camera + limit;
         if(!canBust){ c.lunging=0; c.ramWindup=0; }  // ram fizzled — reset & retry later
